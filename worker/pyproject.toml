@@ -25,6 +25,7 @@ scanner-worker = "worker.main:run"
 scanner-simulate = "worker.simulation.run:main"
 scanner-migrate = "worker.scripts.migrate:main"
 scanner-sync-instruments = "worker.scripts.sync_instruments:main"
+scanner-dashboard-data = "worker.scripts.export_dashboard_fixture:main"
 
 [tool.setuptools.packages.find]
 include = ["worker*"]

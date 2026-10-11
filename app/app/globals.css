@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+/*
+  A trading screen, not a marketing page. The whole visual budget goes on
+  legibility at a glance: tabular figures so columns of prices line up, one accent
+  for "look here", green/red reserved for direction only, and no decoration that
+  competes with a number.
+*/
+@theme {
+  --color-ink: #0b0d10;
+  --color-ink-2: #2c3138;
+  --color-muted: #6a7078;
+  --color-muted-2: #9aa1a9;
+  --color-line: #e6e8eb;
+  --color-line-2: #d2d6db;
+  --color-surface: #ffffff;
+  --color-surface-2: #f6f7f9;
+  --color-accent: #1d52f2;
+  --color-positive: #0f8a5f;
+  --color-negative: #d33131;
+  --color-amber: #b4690e;
+  --color-sim: #7c3aed;
+
+  --font-sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, monospace;
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  background: var(--color-surface-2);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer components {
+  .eyebrow {
+    @apply text-[11px] font-semibold uppercase tracking-[0.16em] text-muted;
+  }
+  /* Every number on this screen is monospaced and tabular; a column must read as
+     a scale, not as text. */
+  .num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+  .card {
+    @apply rounded-lg border border-line bg-surface;
+  }
+  .panel-title {
+    @apply flex items-baseline justify-between gap-3 border-b border-line px-4 py-3;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full border px-2 py-[2px] text-[11px] font-semibold uppercase tracking-wide;
+  }
+  .th {
+    @apply px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-muted;
+  }
+  .td {
+    @apply px-3 py-2 align-top;
+  }
+  .row-hover {
+    @apply transition-colors hover:bg-surface-2;
+  }
+  .link {
+    @apply text-accent underline-offset-4 hover:underline;
+  }
+  /* Filter controls on the watchlist and alert pages. */
+  .input {
+    @apply rounded-md border border-line bg-surface px-2 py-1 text-[12px] text-ink;
+  }
+  .input:focus {
+    @apply border-accent outline-none;
+  }
+}

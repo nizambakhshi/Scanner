@@ -293,6 +293,17 @@ class ScannerStore(ABC):
     @abstractmethod
     async def pending_notification_count(self, *, channel: Channel | None = None) -> int: ...
 
+    @abstractmethod
+    async def delivery_rollup(self, *, session_id: int) -> dict[str, int]:
+        """Delivery counts for one session's signals.
+
+        Keys are ``"<CHANNEL>_<STATUS>"`` (``"TELEGRAM_DELIVERED"``,
+        ``"DASHBOARD_SIMULATED"`` …), values are row counts. The daily summary
+        needs delivered / failed numbers per channel, and a guess from queue
+        depth would be exactly the kind of inferred coverage number the spec
+        forbids: this counts the rows that exist.
+        """
+
     # ── operations ─────────────────────────────────────────────────────────
     @abstractmethod
     async def upsert_heartbeat(self, heartbeat: WorkerHeartbeat) -> None: ...

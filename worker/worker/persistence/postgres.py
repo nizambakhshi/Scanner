@@ -1105,6 +1105,18 @@ class PostgresStore(ScannerStore):
             row = await (await conn.execute(sql, params)).fetchone()
         return int(row["total"]) if row else 0
 
+    async def delivery_rollup(self, *, session_id: int) -> dict[str, int]:
+        sql = """
+            SELECT nd.channel || '_' || nd.delivery_status AS key, COUNT(*)::int AS total
+            FROM notification_deliveries nd
+            JOIN signals s ON s.id = nd.signal_id
+            WHERE s.trading_session_id = %(session_id)s
+            GROUP BY 1
+        """
+        async with self._pool.connection() as conn, conn.transaction():
+            rows = await (await conn.execute(sql, {"session_id": session_id})).fetchall()
+        return {str(row["key"]): int(row["total"]) for row in rows}
+
     # ── operations ──────────────────────────────────────────────────────────
     async def upsert_heartbeat(self, heartbeat: WorkerHeartbeat) -> None:
         sql = """

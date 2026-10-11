@@ -392,6 +392,19 @@ class ScannerPipeline:
         )
         self.initial_scan_completed = True
         await self.store.mark_initial_scan_completed(self.session.id, now)
+        # The scan's per-bucket counts (evaluated / qualified / warming_up /
+        # missing_data …) are the operator's proof of what the universe actually
+        # looked like at open. ``daily_summaries`` has fixed columns and cannot
+        # hold them, and ``v_session_history`` would show a row of zeros, so the
+        # summary is journaled as an audit event the dashboard can read back (§13.12).
+        await self.store.audit(
+            actor="worker",
+            actor_role="SYSTEM",
+            action="initial_scan",
+            entity_type="trading_session",
+            entity_id=str(self.session.id),
+            new_value=summary,
+        )
         if self.alerts is not None:
             await self.alerts.raise_alert(
                 signal_type=SignalType.DAILY_SCAN_COMPLETE,
@@ -417,6 +430,11 @@ class ScannerPipeline:
             key=lambda m: m.latest_score or 0.0,
             reverse=True,
         )
+        coverage = await self.store.coverage(universe=self.params.universe)
+        signals_generated = await self.store.count_signals_since(
+            self.session.id, since=self.window.open_at
+        )
+        rollup = await self.store.delivery_rollup(session_id=self.session.id)
         payload = {
             "kind": "daily_summary",
             "trading_date": self.window.trading_date.isoformat(),
@@ -433,6 +451,23 @@ class ScannerPipeline:
             ],
             "unresolved_stale": summary["unresolved_stale_memberships"],
             "stale_seconds": self.counters.stale_seconds_total,
+            # ``daily_summaries`` has these columns and ``v_session_history`` reads
+            # them; omitted from the payload they silently stayed at their DEFAULT 0,
+            # so the history page reported a qualified/signalled/alerted count of
+            # zero for a day that plainly had alerts (§13.12, §17).
+            "universe_count": coverage.universe_total,
+            "mapped_count": coverage.mapped_total,
+            "subscribed_count": coverage.subscribed_total,
+            "monitored_count": coverage.monitored_total,
+            "candles_persisted": self.counters.candles_finalized,
+            # A watchlist row is created only when an instrument qualifies, so the
+            # rows this session holds *are* the set that qualified today.
+            "qualified_count": len(memberships),
+            "signals_generated": signals_generated,
+            "telegram_delivered": rollup.get("TELEGRAM_DELIVERED", 0),
+            "telegram_failed": rollup.get("TELEGRAM_FAILED", 0)
+            + rollup.get("TELEGRAM_PERMANENTLY_FAILED", 0),
+            "stale_data_seconds": int(round(self.counters.stale_seconds_total)),
         }
         await self.store.write_daily_summary(self.session.id, self.window.trading_date, payload)
         await self.store.finalize_session(self.session.id, now)

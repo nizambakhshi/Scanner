@@ -147,11 +147,16 @@ class InMemoryStore(ScannerStore):
 
     async def coverage(self, *, universe: str = "NIFTY500") -> CoverageCounts:
         rows = [item for item in self.instruments.values() if item.is_nifty500 or universe != "NIFTY500"]
+        # ``monitored`` must mean "data actually arrived", not "we asked for it":
+        # the Postgres store reads it from the heartbeat, which the pipeline fills
+        # from the instruments it has seen ticks for (§5.2 — never imply full
+        # coverage from a subscription list).
+        printed = {instrument_id for instrument_id, _ in self.candles}
         return CoverageCounts(
             universe_total=len(rows),
             mapped_total=sum(1 for r in rows if r.mapping_status == MappingStatus.MAPPED),
             subscribed_total=len(self.subscribed_ids),
-            monitored_total=len(self.subscribed_ids),
+            monitored_total=len(printed & self.subscribed_ids),
             unmapped_total=sum(1 for r in rows if r.mapping_status == MappingStatus.UNMAPPED),
             ambiguous_total=sum(1 for r in rows if r.mapping_status == MappingStatus.AMBIGUOUS),
             invalid_total=sum(1 for r in rows if r.mapping_status == MappingStatus.INVALID),
@@ -485,6 +490,20 @@ class InMemoryStore(ScannerStore):
             if row.delivery_status in (DeliveryStatus.QUEUED, DeliveryStatus.FAILED, DeliveryStatus.IN_FLIGHT)
             and (channel is None or row.channel == channel)
         )
+
+    async def delivery_rollup(self, *, session_id: int) -> dict[str, int]:
+        signal_ids = {
+            key
+            for key, row in self.signals.items()
+            if row.trading_session_id == session_id
+        }
+        counts: dict[str, int] = {}
+        for row in self.deliveries.values():
+            if row.signal_id not in signal_ids:
+                continue
+            key = f"{row.channel.value}_{row.delivery_status.value}"
+            counts[key] = counts.get(key, 0) + 1
+        return counts
 
     # ── operations ──────────────────────────────────────────────────────────
     async def upsert_heartbeat(self, heartbeat: WorkerHeartbeat) -> None:
