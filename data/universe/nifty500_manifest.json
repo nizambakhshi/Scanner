@@ -1,0 +1,48 @@
+{
+  "downloadable": true,
+  "source_url": "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv",
+  "retrieved_at": "2026-10-11T17:27:02+05:30",
+  "http_status": 200,
+  "row_count": 501,
+  "columns": ["Company Name", "Industry", "Symbol", "Series", "ISIN Code"],
+  "sha256": "2959bf206239284e145f7aecc65095b18d11556d2642323a70f2d26efe0f5cb3",
+  "local_file": "nifty500_2026-10-11.csv",
+  "local_path": "/Users/mohdnizam/Desktop/Scanner/data/universe/nifty500_2026-10-11.csv",
+  "file_bytes": 32785,
+  "total_lines_including_header": 502,
+  "response_content_type": "application/octet-stream",
+  "request_requirements": {
+    "cookies_required": false,
+    "referer_required": false,
+    "auth_required": false,
+    "user_agent_required": true,
+    "detail": "Returns HTTP 200 with a browser User-Agent AND with the User-Agent header omitted entirely, but the request hangs and fails when curl's default 'curl/8.7.1' User-Agent is sent. Observed on curl 8.7.1: default UA -> http_code 000, curl exit 56 ('Failure when receiving data from the peer') after a 25s timeout; 'User-Agent: Mozilla/5.0 ... Chrome/120' -> 200, 32785 bytes, application/octet-stream; 'User-Agent:' (suppressed) -> 200, 32785 bytes. So the block is a User-Agent string denylist, not a cookie/JS challenge. Scripted refreshes must set an explicit non-curl User-Agent."
+  },
+  "verification": {
+    "duplicate_symbols": 0,
+    "malformed_rows": 0,
+    "series_breakdown": { "EQ": 495, "BE": 3, "RR": 3 },
+    "non_eq_rows": [
+      "Bagmane Prime Office REIT,BAGMANE,RR",
+      "Brookfield India Real Estate Trust,BIRET,RR",
+      "EMBASSY OFFICE PARKS REIT,EMBASSY,RR",
+      "HFCL Ltd.,HFCL,BE",
+      "MTAR Technologies Ltd.,MTARTECH,BE",
+      "Sterlite Technologies Ltd.,STLTECH,BE"
+    ]
+  },
+  "segment_source_urls": {
+    "large_100": "https://www.niftyindices.com/IndexConstituent/ind_nifty100list.csv",
+    "mid_150": "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap150list.csv",
+    "small_250": "https://www.niftyindices.com/IndexConstituent/ind_niftysmallcap250list.csv",
+    "verified_rows_today": { "large_100": 100, "mid_150": 150, "small_250": 251 }
+  },
+  "caveats": [
+    "ROW COUNT MISMATCH: the official file currently contains 501 constituent rows, not the nominal 500. This was verified, not a parsing artefact: all 501 data rows have exactly 5 comma-separated fields, there are zero duplicate Symbol values, and the trailing byte count matches the advertised Content-Length (32785).",
+    "SEGMENT SPLIT CONFIRMED BY SET EQUALITY: Nifty 500 == Nifty 100 (Large, 100) UNION Nifty Midcap 150 (Mid, 150) UNION Nifty Smallcap 250 (Small, 251), verified 2026-10-11 with ZERO overlaps and ZERO unmatched symbols in either direction. So the documented 100/150/250 structure holds for the large and mid legs, but the small-cap leg currently carries 251 names, which is exactly why the parent list has 501 rows rather than 500. The nominal 500 count is a target, not a hard row guarantee.",
+    "NO SEGMENT COLUMN: the nifty500 CSV columns are Company Name, Industry, Symbol, Series, ISIN Code. 'Series' is the NSE listing/security series (EQ / BE / RR), where RR = REIT units and BE is a book-entry listing designation; it is NOT the large/mid/small cap tier. To tag segments, join against these three sibling files (same directory, same User-Agent requirement, all verified HTTP 200 application/octet-stream today): IndexConstituent/ind_nifty100list.csv (100 rows), IndexConstituent/ind_niftymidcap150list.csv (150 rows), IndexConstituent/ind_niftysmallcap250list.csv (251 rows). Note 'ind_nifty150list.csv' does NOT exist - it is a soft-404; the correct mid-cap filename has the 'midcap' infix.",
+    "THREE REITs (BAGMANE, BIRET, EMBASSY) are present with Series=RR. These do not have Angel One SmartAPI equity 'NSE' instrument types, so an options/scanner pipeline keyed on equity instrument_type should expect them to miss a join.",
+    "The 2023-era URL patterns commonly cited in tutorials are dead: archives.nseindia.com/IndIndices/Nifty500/NIFTY_500_List_Series1.csv and nsearchives.nseindia.com/IndIndices/Nifty500/NIFTY_500_List_Series1.csv both return HTTP 503 from AkamaiGHost, and www.nseindia.com/content/indices/ind_nifty500list.csv returns HTTP 404. Guesses on niftyindices.com/IndexLibrary/*.csv, niftyindices.com/reports/*.csv and the Index-Constituents/IndexArchive path all return HTTP 200 but with Content-Type text/html containing an 'Error 404' page - note that this site serves soft-404s with a 200 status, so a status code alone is NOT proof of success; check Content-Type is application/octet-stream or that the first line is the expected header.",
+    "This is a point-in-time snapshot. NSE reconstitutes Nifty 500 semi-annually (typically with the 100/150/250 series revision effective end of September and end of March), plus ad-hoc changes via circular, so the file must be re-downloaded and the sha256 compared on a schedule rather than assumed stable."
+  ]
+}

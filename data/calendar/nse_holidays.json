@@ -1,0 +1,51 @@
+{
+  "source": "https://www.nseindia.com/api/holiday-master?type=trading&year=2026",
+  "source_type": "official",
+  "retrieved_at": "2026-10-11",
+  "timezone": "Asia/Kolkata",
+  "regular_session": {
+    "open": "09:15",
+    "close": "15:30",
+    "pre_open_start": "09:00",
+    "post_close_end": "16:00"
+  },
+  "holidays": [
+    {
+      "date": "2026-10-20",
+      "reason": "Dussehra",
+      "segments": ["NSE Equity"]
+    },
+    {
+      "date": "2026-11-08",
+      "reason": "Diwali Laxmi Pujan (muhurat trading day; falls on Sunday)",
+      "segments": ["NSE Equity"]
+    },
+    {
+      "date": "2026-11-10",
+      "reason": "Diwali-Balipratipada",
+      "segments": ["NSE Equity"]
+    },
+    {
+      "date": "2026-11-24",
+      "reason": "Prakash Gurpurb Sri Guru Nanak Dev",
+      "segments": ["NSE Equity"]
+    },
+    {
+      "date": "2026-12-25",
+      "reason": "Christmas",
+      "segments": ["NSE Equity"]
+    }
+  ],
+  "notes": "PROVENANCE: All five dates above were read directly from NSE's own machine-readable holiday API (the endpoint that populates https://www.nseindia.com/resources/exchange-communication-holidays), retrieved 2026-10-11T17:27+05:30. In the raw response the equity list is the 'CBM' array (20 entries); the 'CM' array is byte-identical, and 'FO'/'NDM' also carry the same 20 equity dates. The 'EGR' array is a different, smaller set and is NOT equity.\n\nCOVERAGE GAP (IMPORTANT): NSE publishes holidays by CALENDAR year, and the sibling endpoint https://www.nseindia.com/api/holiday-year-list currently returns exactly {\"year\":[\"2026\"]}. Requesting year=2027 returns an empty object {}. Therefore the Jan-2027-to-Mar-2027 portion of the requested Oct-2026-to-Mar-2027 window is NOT YET PUBLISHED and no dates for it are included here - none were invented or extrapolated. The CY2027 list is expected to be posted on the same page (historically around Dec/Jan). Until then this file is a partial snapshot covering only the tail of CY2026, and any scanner that relies on it must treat unknown future dates conservatively and re-run the refresh.\n\nFULL CY2026 LIST (past dates, retained only for reference; not in 'holidays' because they precede the requested window): 15-Jan Municipal Corporation Election - Maharashtra; 26-Jan Republic Day; 15-Feb Mahashivratri (Sun); 03-Mar Holi; 21-Mar Id-Ul-Fitr (Ramadan Eid) (Sat); 26-Mar Shri Ram Navami; 31-Mar Shri Mahavir Jayanti; 03-Apr Good Friday; 14-Apr Dr. Baba Saheb Ambedkar Jayanti; 01-May Maharashtra Day; 28-May Bakri Id; 26-Jun Muharram; 15-Aug Independence Day (Sat); 14-Sep Ganesh Chaturthi; 02-Oct Mahatma Gandhi Jayanti.\n\nHALF-DAY / MUHURAT: The API's 'morning_session' and 'evening_session' fields are null for every 2026 equity entry, i.e. NSE published no half-day (morning-only) sessions for equities in CY2026. Verbatim note rendered on the NSE holidays page: 'Note: November 08, 2026, shall be a trading holiday on account of Diwali Laxmi Pujan. Muhurat Trading will be conducted on that day. Timings of Muhurat Trading shall be notified subsequently through a circular.' The API marks this entry 'Diwali Laxmi Pujan*' (asterisked), but the muhurat window itself was still unpublished at retrieval time, so no muhurat session times are recorded here. 2026-11-08 is a Sunday and is additionally a non-trading day regardless.\n\nSESSION TIMES: 'regular_session' values were verified against https://www.nseindia.com/static/market-data/market-timings (Equities table, retrieved 2026-10-11), NOT assumed. That table states: Block Deal session 1 08:45-09:00; Pre-open session (Regular) 09:00-09:08; Normal / Odd lot market 09:15-15:30; Auction market 14:00-14:30; Block Deal session 2 14:05-14:20; Closing session 15:40-16:00; Trade Modification cut-off 16:15. DEVIATION FROM THE ORIGINALLY REQUESTED VALUE: 'post_close_end' is set to 16:00, not 15:40, because NSE lists 15:40 as the OPEN of the closing session and 16:00 as its close; if downstream code uses post_close_end as an 'ignore signals after this' cutoff, note that 15:30 is the end of continuous trading and 15:40-16:00 is a limited closing session that does not use limit orders. The 09:00-09:08 pre-open window is the order-entry leg; the pre-open/price-matching period runs up to the 09:15 open.\n\nFETCH RECIPE: the API is Akamai-protected. A bare 'curl' with the default 'curl/8.7.1' User-Agent to nseindia.com fails; request https://www.nseindia.com/resources/exchange-communication-holidays first with a browser User-Agent to obtain the ASP.NET session cookie, then call the API with that cookie jar plus a Referer of the holidays page. Both the API and the year-list returned HTTP 200 and application/json with this approach.\n\nEXCLUDED SEGMENTS: the same response also carries holiday arrays for CD, CMOT, COM, EGR, FO, IRD, MF, NTRP and SLBS. Only the equity (CBM) array was used, per the 'NSE Equity' scope of this file.",
+  "raw_source_details": {
+    "human_page": "https://www.nseindia.com/resources/exchange-communication-holidays",
+    "api_endpoint": "https://www.nseindia.com/api/holiday-master?type=trading&year=2026",
+    "year_list_endpoint": "https://www.nseindia.com/api/holiday-year-list",
+    "year_list_response": "{\"year\":[\"2026\"]}",
+    "equity_array_key": "CBM",
+    "equity_array_length": 20,
+    "timings_source": "https://www.nseindia.com/static/market-data/market-timings",
+    "http_status": 200,
+    "retrieved_at_ist": "2026-10-11T17:27:02+05:30"
+  }
+}

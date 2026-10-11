@@ -1,0 +1,37 @@
+# ── OS / editor ────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# ── Secrets: never commit real environment files ───────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ── Python worker ──────────────────────────────────────────────────────────
+worker/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+worker/logs/
+logs/
+*.sqlite
+coverage.xml
+htmlcov/
+.worker_state/
+
+# ── Node / Next.js app ─────────────────────────────────────────────────────
+node_modules/
+app/.next/
+app/out/
+app/next-env.d.ts
+*.tsbuildinfo
+
+# ── Local data caches (instrument master downloads) ────────────────────────
+data/cache/
+*.tmp

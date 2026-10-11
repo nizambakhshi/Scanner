@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "angel-bullish-scanner-worker"
+version = "0.1.0"
+description = "Persistent market-data worker: Angel One SmartAPI ticks -> 1-minute candles -> bullish scanner -> watchlist -> Telegram alerts"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx==0.28.1",
+    "psycopg[binary,pool]==3.3.6",
+    "pyotp==2.10.0",
+    "python-dotenv==1.2.4",
+    "structlog==26.1.0",
+    "tzdata==2026.5",
+    "websockets==17.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "ruff==0.17.0"]
+
+[project.scripts]
+scanner-worker = "worker.main:run"
+scanner-simulate = "worker.simulation.run:main"
+scanner-migrate = "worker.scripts.migrate:main"
+scanner-sync-instruments = "worker.scripts.sync_instruments:main"
+
+[tool.setuptools.packages.find]
+include = ["worker*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q --strict-markers"
+markers = [
+    "integration: requires a real PostgreSQL database (DATABASE_URL)",
+    "live: requires real Angel One credentials (never run in CI)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "ASYNC"]
+ignore = ["E501", "SIM105"]
