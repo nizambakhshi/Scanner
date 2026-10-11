@@ -133,23 +133,33 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
     // the only subject a valid cookie can ever describe.
     return { id: payload.sub, email: payload.email, role: payload.role, displayName: null, source: "replay" };
   }
-  const rows = await query<Raw>(
-    `SELECT s.id AS jti, s.user_id::text AS sub, s.expires_at, s.revoked_at,
-            u.email, u.role, u.display_name, u.is_active
-     FROM app_sessions s
-     JOIN app_users u ON u.id = s.user_id
-     WHERE s.id = $1::text`,
-    [payload.jti],
-  );
+  let rows: Raw[];
+  try {
+    rows = await query<Raw>(
+      `SELECT s.id AS jti, s.user_id::text AS sub, s.expires_at, s.revoked_at,
+              u.email, u.role, u.display_name, u.is_active
+       FROM app_sessions s
+       JOIN app_users u ON u.id = s.user_id
+       WHERE s.id = $1::text`,
+      [payload.jti],
+    );
+  } catch {
+    // A stalled or failed session read sends the operator back to sign-in rather
+    // than to a raw 500: an unverifiable session is exactly what "not signed in"
+    // means for authorization (§16 fail-closed), and the deadline in `lib/db.ts`
+    // guarantees this branch arrives in seconds, not after minutes of hang.
+    return null;
+  }
   const row = rows[0];
   if (!row || row.revoked_at || row.sub !== payload.sub || row.email !== payload.email) return null;
   if (row.is_active === false) return null;
   // last_seen_at is written at most once a minute so a 30-second refresh loop
-  // cannot turn a page view into five database writes.
+  // cannot turn a page view into five database writes. It is telemetry, not the
+  // authorization itself, so a failure here must not blank the page.
   await query(
     "UPDATE app_sessions SET last_seen_at = now() WHERE id = $1::text AND last_seen_at < now() - interval '60 seconds'",
     [payload.jti],
-  );
+  ).catch(() => {});
   return {
     id: String(row.sub),
     email: String(row.email),

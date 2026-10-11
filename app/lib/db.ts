@@ -15,6 +15,13 @@
  *   test server and is reported on the health page; `no-verify` would be a
  *   silently broken production setting, so it is accepted (self-hosted proxies
  *   legitimately need it) but always labelled.
+ * * **Frozen instances.** On serverless (Vercel) a function instance is frozen
+ *   between requests and thawed later, but the TCP sockets it was holding are
+ *   killed by the pooler's idle timeout meanwhile. The thawed instance then
+ *   writes the next query into a half-dead socket and the driver waits for a
+ *   reply that will never come. Every read therefore carries a deadline; hitting
+ *   it retires the whole pool, and read-only statements retry once on fresh
+ *   sockets — a slow page is survivable, a page that never answers is not.
  */
 
 import postgres, { type Sql } from "postgres";
@@ -28,6 +35,42 @@ type Pool = Sql & { [Symbol.asyncDispose]?: () => Promise<void> };
 
 let client: Pool | null = null;
 let lastError: string | null = null;
+
+/** Ceiling for any single database read. Healthy reads against the far-away
+ *  pooler are tens of milliseconds; only a stalled or half-dead socket
+ *  approaches this. */
+const READ_DEADLINE_MS = 3500;
+const TIMEOUT_MARK = "database read timed out";
+
+/** Drop the pool so the next `getSql()` opens brand-new sockets. */
+function retirePool(): void {
+  const existing = client;
+  client = null;
+  void existing?.end({ timeout: 1 })?.catch(() => {});
+}
+
+/**
+ * Race a database read against a deadline. Exported (with `isReadTimeout`) for
+ * tests — production code always goes through `query()`.
+ */
+export function withReadDeadline<T>(pending: Promise<T>, ms: number = READ_DEADLINE_MS): Promise<T> {
+  // The race can lose to the timer; mark the query promise as handled so its
+  // late rejection can never crash the process as an unhandled rejection.
+  pending.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${TIMEOUT_MARK} after ${ms}ms`)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([pending, deadline]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/** True when `error` is the deadline rejection above (never a driver message). */
+export function isReadTimeout(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith(TIMEOUT_MARK);
+}
 
 function isTransactionPooler(url: string): boolean {
   return url.includes("pooler.supabase.com") && url.includes(":6543");
@@ -44,7 +87,12 @@ export function getSql(): Pool {
     max: 4,
     idle_timeout: 20,
     connect_timeout: 10,
-    max_lifetime: 60 * 30,
+    // Recycle connections often: on serverless a socket minutes old has almost
+    // certainly been frozen and NAT-expired at least once.
+    max_lifetime: 60 * 5,
+    // Probe live sockets every 10s so a pooler-side disconnect surfaces as an
+    // error the panels can show, instead of a query waiting on a dead write.
+    keep_alive: 10,
     ssl,
     prepare: !isTransactionPooler(env.databaseUrl),
     onnotice: () => {},
@@ -60,7 +108,7 @@ export function lastConnectionError(): string | null {
 export async function healthcheck(): Promise<{ ok: boolean; detail: string }> {
   if (env.databaseUrl === "") return { ok: false, detail: "DATABASE_URL is not set" };
   try {
-    const rows = await getSql().unsafe<{ version: string; now: string }[]>(
+    const rows = await query<{ version: string; now: string }>(
       "SELECT current_setting('server_version') AS version, now()::text AS now",
     );
     return { ok: true, detail: `PostgreSQL ${rows[0]?.version ?? "?"}` };
@@ -80,7 +128,19 @@ export async function closeDb(): Promise<void> {
 }
 
 /** `SELECT …` with positional parameters, always via `unsafe` so the transaction
- *  pooler never sees a prepared statement it cannot reuse. */
+ *  pooler never sees a prepared statement it cannot reuse. Every read carries the
+ *  deadline above; hitting it retires the pool, and a read-only statement is then
+ *  retried once on brand-new sockets — a stalled response on a half-dead
+ *  connection is a connection problem, not a query problem. Writes are never
+ *  retried: their first attempt may have reached the server before the stall. */
 export async function query<T extends Record<string, unknown>>(text: string, params: unknown[] = []): Promise<T[]> {
-  return getSql().unsafe<T[]>(text, params as never[]);
+  const readOnly = /^\s*select\b/i.test(text);
+  try {
+    return await withReadDeadline(getSql().unsafe<T[]>(text, params as never[]));
+  } catch (error) {
+    if (!isReadTimeout(error)) throw error;
+    retirePool();
+    if (!readOnly) throw error;
+    return await withReadDeadline(getSql().unsafe<T[]>(text, params as never[]));
+  }
 }

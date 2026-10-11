@@ -36,6 +36,12 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  // Keep the Postgres driver out of the server bundle. Bundled, its socket and
+  // timer handling loses to the sandboxed globals (a stalled pooled connection
+  // then never surfaces as an error — reads into it simply hang until the app's
+  // own deadline fires); as an external package it runs as shipped, with real
+  // Node net/timeout semantics.
+  serverExternalPackages: ["postgres"],
   // Single-app monorepo: keep Turbopack pointed at this directory, not the repo
   // root, so it never walks the Python worker tree.
   turbopack: { root: path.resolve(__dirname) },
