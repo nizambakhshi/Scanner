@@ -8,7 +8,7 @@ Usage::
 
 Rules (spec §18 operations):
 
-* files run in lexicographic order, each inside its own transaction;
+* files run in lexicographic order;
 * a file is applied only when its name is absent from ``schema_migrations``;
 * the recorded sha256 checksum is compared on every run — a file whose
   checksum changed after being applied fails loudly instead of silently
@@ -16,6 +16,19 @@ Rules (spec §18 operations):
 * ``schema_migrations`` is created by this script when missing, mirroring the
   definition in 0001_init.sql so the very first run works;
 * no tracebacks and never the connection string in output.
+
+Execution model: **one statement per round trip, each autocommitted.**
+Supabase's proxy drops a connection whose first message is a multi-kilobyte
+multi-statement string ("the connection is closed"), so the whole-file
+transaction this runner originally shipped can never complete there. Each
+statement of a file is sent separately; a connection closed mid-file is
+reopened and the remaining statements continue from the next one. A file is
+registered in ``schema_migrations`` only after every statement has run, and
+re-runs after a mid-file failure skip objects reported as "already exists" —
+the shipped files are idempotent (``IF NOT EXISTS``/``OR REPLACE``/
+``ON CONFLICT DO NOTHING``) so the resume is exact. The trade-off against the
+original design is per-file atomicity; the registry plus idempotency replaces
+it.
 """
 
 from __future__ import annotations
@@ -71,6 +84,90 @@ def _checksum(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _without_comment_lines(text: str) -> str:
+    return "".join(
+        line for line in text.splitlines(keepends=True)
+        if not line.lstrip().startswith("--")
+    ).strip()
+
+
+def _split_statements(sql: str) -> list[str]:
+    """Cut a migration file into individually executable statements.
+
+    Boundaries are lines ending in ``;`` that sit outside a dollar-quoted body
+    and outside a string literal. Full-line ``--`` comments are stripped from
+    the front of each statement (a statement glued behind a comment would
+    otherwise be dropped by naive "starts with --" checks). Known limits, safe
+    for the shipped files: ``$$`` inside string literals and trailing comments
+    containing an odd number of apostrophes are not tracked.
+    """
+    statements: list[str] = []
+    buf: list[str] = []
+    in_dollar = False
+    in_string = False
+    for line in sql.splitlines(keepends=True):
+        # XOR toggle on any odd ``$$`` count: the same expression opens and
+        # closes a dollar-quoted body, so it must not be guarded by the state.
+        if not line.lstrip().startswith("--") and line.count("$$") % 2:
+            in_dollar = not in_dollar
+        buf.append(line)
+        if not in_dollar and not line.lstrip().startswith("--") and line.count("'") % 2:
+            in_string = not in_string
+        if not in_dollar and not in_string and line.rstrip().endswith(";"):
+            body = _without_comment_lines("".join(buf))
+            if body:
+                statements.append(body)
+            buf = []
+    tail = _without_comment_lines("".join(buf))
+    if tail:
+        statements.append(tail)
+    return statements
+
+
+class _Runner:
+    """One autocommitted statement per round trip, surviving pooler severings.
+
+    Managed proxies (Supabase's pgbouncer) close connections that arrive with
+    a multi-statement string or an idle explicit transaction, and the app's own
+    URL uses the transaction pooler. Reconnecting per failure keeps a partially
+    applied file resumable; idempotent DDL plus the "already exists" skip makes
+    the resume exact.
+    """
+
+    def __init__(self, database_url: str) -> None:
+        self.url = database_url
+        self.conn = psycopg.connect(database_url, application_name="scanner-migrate", autocommit=True)
+
+    def _reset(self) -> None:
+        try:
+            self.conn.close()
+        except psycopg.Error:
+            pass
+        self.conn = psycopg.connect(self.url, application_name="scanner-migrate", autocommit=True)
+
+    def query(self, sql: str) -> list[tuple]:
+        return self.execute(sql, fetch=True) or []
+
+    def execute(self, sql: str, params: tuple | None = None, *, fetch: bool = False):
+        for attempt in (1, 2):
+            try:
+                cur = self.conn.execute(sql, params) if params else self.conn.execute(sql)
+                return cur.fetchall() if fetch else None
+            except psycopg.OperationalError as exc:
+                # Only a severed connection is retryable; a real failure must not
+                # mask itself behind a reconnect loop.
+                if attempt == 2 or "closed" not in str(exc).lower():
+                    raise
+                self._reset()
+        return None
+
+    def close(self) -> None:
+        try:
+            self.conn.close()
+        except psycopg.Error:
+            pass
+
+
 def _first_line(exc: BaseException) -> str:
     return str(exc).splitlines()[0].strip() if str(exc).strip() else type(exc).__name__
 
@@ -90,7 +187,7 @@ def run(database_url: str, migrations_dir: str, *, dry_run: bool, status: bool) 
         return 2
 
     try:
-        conn = psycopg.connect(database_url, application_name="scanner-migrate", autocommit=False)
+        runner = _Runner(database_url)
     except psycopg.Error as exc:
         print(f"error: cannot connect to the database: {_first_line(exc)}", file=sys.stderr)
         return 1
@@ -100,14 +197,12 @@ def run(database_url: str, migrations_dir: str, *, dry_run: bool, status: bool) 
             # Read-only modes never create anything; a database without the
             # registry table simply has nothing applied yet.
             try:
-                rows = conn.execute("SELECT name, checksum FROM schema_migrations").fetchall()
+                rows = runner.query("SELECT name, checksum FROM schema_migrations")
             except psycopg.errors.UndefinedTable:
-                conn.rollback()
                 rows = []
         else:
-            with conn:
-                conn.execute(ENSURE_MIGRATIONS_TABLE)
-            rows = conn.execute("SELECT name, checksum FROM schema_migrations").fetchall()
+            runner.execute(ENSURE_MIGRATIONS_TABLE)
+            rows = runner.query("SELECT name, checksum FROM schema_migrations")
         applied = dict(rows)
 
         pending = 0
@@ -136,18 +231,28 @@ def run(database_url: str, migrations_dir: str, *, dry_run: bool, status: bool) 
                 print(f"dry-run  {name} (would apply)")
                 pending += 1
             else:
-                sql = _strip_transaction_control(path.read_text())
+                statements = _split_statements(_strip_transaction_control(path.read_text()))
+                skipped = 0
                 try:
-                    with conn.transaction():
-                        conn.execute(sql)
-                        conn.execute(
-                            "INSERT INTO schema_migrations (name, checksum) VALUES (%s, %s)",
-                            (name, checksum),
-                        )
+                    for statement in statements:
+                        try:
+                            runner.execute(statement)
+                        except psycopg.Error as exc:
+                            # A re-run after a mid-file failure: an object that
+                            # already exists means this statement already did
+                            # its job on the previous attempt.
+                            if "already exists" not in str(exc):
+                                raise
+                            skipped += 1
                 except psycopg.Error as exc:
                     print(f"FAIL     {name}: {_first_line(exc)}", file=sys.stderr)
                     return 4
-                print(f"applied  {name} (checksum {checksum[:12]}…)")
+                runner.execute(
+                    "INSERT INTO schema_migrations (name, checksum) VALUES (%s, %s)",
+                    (name, checksum),
+                )
+                note = f", {skipped} pre-existing" if skipped else ""
+                print(f"applied  {name} ({len(statements)} statements, checksum {checksum[:12]}…{note})")
 
         if status:
             print(f"{len(applied)} applied, {pending} pending")
@@ -160,10 +265,7 @@ def run(database_url: str, migrations_dir: str, *, dry_run: bool, status: bool) 
         print(f"error: migration failed: {_first_line(exc)}", file=sys.stderr)
         return 1
     finally:
-        try:
-            conn.close()
-        except psycopg.Error:  # pragma: no cover - closing must not mask results
-            pass
+        runner.close()
 
 
 def main(argv: list[str] | None = None) -> int:
