@@ -1,9 +1,19 @@
-import { Panel, ErrorNote, PageHeading } from "@/components/ui";
+import { Panel, ErrorNote, PageHeading, FilterChip, Empty } from "@/components/ui";
 import { StocksTable } from "@/components/StocksTable";
+import { filterStocksByBias, parseStockBiasFilter, type StockBiasFilter } from "@/lib/filters";
 import { ok, panel } from "@/lib/panel";
 import { source } from "@/lib/source";
 
 export const dynamic = "force-dynamic";
+
+/** What an empty result under each filter means — written per filter so the
+ *  message never confuses "nothing in this cut" with "the universe is empty". */
+const FILTER_EMPTY: Record<Exclude<StockBiasFilter, "ALL">, string> = {
+  CLASSIFIED: "No classified stocks yet — the daily/weekly sync has not covered any symbol",
+  BULLISH: "No bullish stocks right now",
+  BEARISH: "No bearish stocks right now",
+  NEUTRAL: "No neutral stocks right now",
+};
 
 /**
  * The stocks directory: every instrument in the scanner's configured universe, with
@@ -14,14 +24,27 @@ export const dynamic = "force-dynamic";
  * the scanner scans — not a static NIFTY500 copy that would silently disagree with
  * it. Prices come from the synced daily bars, which make this page readable outside
  * market hours, when no intraday candle exists.
+ *
+ * The tally chips above the table are the table's filters: each chip's count is a
+ * statement about the full universe, and clicking one narrows the table (the cut
+ * lives in `?bias=`, so it is shareable and the back button works).
  */
-export default async function StocksPage() {
+export default async function StocksPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const params = await searchParams;
+  const bias = parseStockBiasFilter(params.bias);
+
   const stocks = await panel(() => source().stocksOverview());
   const rows = ok(stocks) ? stocks.data : [];
+  const visible = filterStocksByBias(rows, bias);
 
   const classified = rows.filter((row) => row.rsi_bias !== null).length;
   const bullish = rows.filter((row) => row.rsi_bias === "BULLISH").length;
   const bearish = rows.filter((row) => row.rsi_bias === "BEARISH").length;
+  const neutral = rows.filter((row) => row.rsi_bias === "NEUTRAL").length;
 
   return (
     <div className="space-y-4">
@@ -37,14 +60,36 @@ export default async function StocksPage() {
       />
 
       <div className="flex flex-wrap gap-2 text-[12px]">
-        <Tally label="In view" value={rows.length} />
-        <Tally label="RSI classified" value={classified} tone={classified > 0 ? "text-ink-2" : "text-amber"} />
-        <Tally label="Bullish" value={bullish} tone="text-positive" />
-        <Tally label="Bearish" value={bearish} tone="text-negative" />
+        <FilterChip href="/stocks" label="In view" value={rows.length} active={bias === "ALL"} />
+        <FilterChip
+          href="/stocks?bias=CLASSIFIED"
+          label="RSI classified"
+          value={classified}
+          tone={classified > 0 ? "text-ink-2" : "text-amber"}
+          active={bias === "CLASSIFIED"}
+        />
+        <FilterChip href="/stocks?bias=BULLISH" label="Bullish" value={bullish} tone="text-positive" active={bias === "BULLISH"} />
+        <FilterChip href="/stocks?bias=BEARISH" label="Bearish" value={bearish} tone="text-negative" active={bias === "BEARISH"} />
+        <FilterChip href="/stocks?bias=NEUTRAL" label="Neutral" value={neutral} tone="text-muted" active={bias === "NEUTRAL"} />
       </div>
 
-      <Panel title="Universe" hint={ok(stocks) ? `read from the ${source().name} source` : undefined}>
-        {ok(stocks) ? <StocksTable rows={rows} /> : <ErrorNote title="Stocks directory unavailable" detail={stocks.error} />}
+      <Panel
+        title="Universe"
+        hint={
+          ok(stocks)
+            ? `read from the ${source().name} source${bias !== "ALL" ? ` · showing ${visible.length}` : ""}`
+            : undefined
+        }
+      >
+        {ok(stocks) ? (
+          rows.length > 0 && visible.length === 0 && bias !== "ALL" ? (
+            <Empty>{FILTER_EMPTY[bias]} — the counts above are of the full universe.</Empty>
+          ) : (
+            <StocksTable rows={visible} />
+          )
+        ) : (
+          <ErrorNote title="Stocks directory unavailable" detail={stocks.error} />
+        )}
       </Panel>
 
       {ok(stocks) && rows.length > 0 ? (
@@ -55,13 +100,5 @@ export default async function StocksPage() {
         </p>
       ) : null}
     </div>
-  );
-}
-
-function Tally({ label, value, tone = "text-ink-2" }: { label: string; value: number; tone?: string }) {
-  return (
-    <span className="chip border-line bg-surface text-muted">
-      {label} <span className={`num font-bold ${tone}`}>{value}</span>
-    </span>
   );
 }

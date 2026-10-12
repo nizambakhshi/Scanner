@@ -1,5 +1,6 @@
-import { Panel, ErrorNote, PageHeading } from "@/components/ui";
+import { Panel, ErrorNote, PageHeading, FilterChip, Empty } from "@/components/ui";
 import { OrbTable } from "@/components/OrbTable";
+import { filterOrbViews, parseOrbStatusFilter, type OrbStatusFilter } from "@/lib/filters";
 import { longDate } from "@/lib/format";
 import { compareOrb, deriveOrb } from "@/lib/orb";
 import { ok, panel } from "@/lib/panel";
@@ -7,6 +8,14 @@ import { source } from "@/lib/source";
 import type { ReactNode } from "react";
 
 export const dynamic = "force-dynamic";
+
+/** What an empty result under each filter means — per filter, so the message
+ *  never confuses "no setups in this cut" with "no data at all". */
+const ORB_FILTER_EMPTY: Record<Exclude<OrbStatusFilter, "ALL">, string> = {
+  BROKE_UP: "No up-breakouts right now",
+  BROKE_DOWN: "No down-breakouts right now",
+  CONFIRMED: "No confirmed setups right now — no breakout passes all three filters",
+};
 
 /**
  * Strategy 1 — Opening Range Breakout (5-min ORB with VWAP filter), evaluated
@@ -17,10 +26,18 @@ export const dynamic = "force-dynamic";
  * and it stops there. Placing orders is outside this system's charter, so the
  * page is a monitor, not an execution surface.
  */
-export default async function StrategyPage() {
+export default async function StrategyPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const params = await searchParams;
+  const status = parseOrbStatusFilter(params.status);
+
   const orb = await panel(() => source().orbStrategy());
   const rows = ok(orb) ? orb.data : [];
   const views = rows.map(deriveOrb).sort(compareOrb);
+  const visible = filterOrbViews(views, status);
 
   const brokeUp = views.filter((view) => view.status === "BROKE_UP").length;
   const brokeDown = views.filter((view) => view.status === "BROKE_DOWN").length;
@@ -43,22 +60,34 @@ export default async function StrategyPage() {
       <StrategyRules />
 
       <div className="flex flex-wrap gap-2 text-[12px]">
-        <Tally label="In view" value={views.length} />
-        <Tally label="Broke up" value={brokeUp} tone="text-positive" />
-        <Tally label="Broke down" value={brokeDown} tone="text-negative" />
-        <Tally label="All filters pass" value={confirmed} tone={confirmed > 0 ? "text-positive" : "text-ink-2"} />
+        <FilterChip href="/strategy" label="In view" value={views.length} active={status === "ALL"} />
+        <FilterChip href="/strategy?status=BROKE_UP" label="Broke up" value={brokeUp} tone="text-positive" active={status === "BROKE_UP"} />
+        <FilterChip href="/strategy?status=BROKE_DOWN" label="Broke down" value={brokeDown} tone="text-negative" active={status === "BROKE_DOWN"} />
+        <FilterChip
+          href="/strategy?status=CONFIRMED"
+          label="All filters pass"
+          value={confirmed}
+          tone={confirmed > 0 ? "text-positive" : "text-ink-2"}
+          active={status === "CONFIRMED"}
+        />
       </div>
 
       <Panel
         title="Opening range board"
         hint={
           ok(orb)
-            ? `${sessionDate ? `session ${longDate(sessionDate)} · ` : ""}read from the ${source().name} source`
+            ? `${sessionDate ? `session ${longDate(sessionDate)} · ` : ""}read from the ${source().name} source${
+                status !== "ALL" ? ` · showing ${visible.length}` : ""
+              }`
             : undefined
         }
       >
         {ok(orb) ? (
-          <OrbTable views={views} />
+          views.length > 0 && visible.length === 0 && status !== "ALL" ? (
+            <Empty>{ORB_FILTER_EMPTY[status]} — the counts above describe the full board.</Empty>
+          ) : (
+            <OrbTable views={visible} />
+          )
         ) : (
           <ErrorNote title="Strategy board unavailable" detail={orb.error} />
         )}
@@ -114,13 +143,5 @@ function Rule({ heading, children }: { heading: string; children: ReactNode }) {
       <p className="eyebrow">{heading}</p>
       <p className="mt-1 text-[12.5px] leading-snug text-ink-2">{children}</p>
     </div>
-  );
-}
-
-function Tally({ label, value, tone = "text-ink-2" }: { label: string; value: number; tone?: string }) {
-  return (
-    <span className="chip border-line bg-surface text-muted">
-      {label} <span className={`num font-bold ${tone}`}>{value}</span>
-    </span>
   );
 }

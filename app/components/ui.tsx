@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { ReactNode } from "react";
 
 export function Panel({
@@ -82,5 +83,36 @@ export function PageHeading({
       </div>
       {aside ? <div className="flex flex-wrap items-center gap-2">{aside}</div> : null}
     </div>
+  );
+}
+
+/** A tally that is also its filter: the count reports the full set, the click
+ *  narrows the table to exactly those rows. The active chip is filled, so the
+ *  current cut is unmistakable at a glance. */
+export function FilterChip({
+  href,
+  label,
+  value,
+  tone = "text-ink-2",
+  active,
+}: {
+  href: string;
+  label: string;
+  value: number;
+  tone?: string;
+  active: boolean;
+}) {
+  return (
+    <Link
+      href={href}
+      aria-current={active ? "true" : undefined}
+      className={`chip ${
+        active
+          ? "border-ink bg-ink text-surface"
+          : "border-line bg-surface text-muted hover:border-line-2 hover:text-ink-2"
+      }`}
+    >
+      {label} <span className={`num font-bold ${active ? "text-surface" : tone}`}>{value}</span>
+    </Link>
   );
 }
