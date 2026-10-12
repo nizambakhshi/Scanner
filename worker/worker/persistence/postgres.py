@@ -396,7 +396,12 @@ class PostgresStore(ScannerStore):
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     async def connect(self) -> None:
-        if not self._pool.open:
+        # `pool.closed` is the property; `pool.open` is the *method*, so the
+        # tempting `if not self._pool.open` is always False and silently skips
+        # the open forever (this exact bug made every worker DB write raise
+        # "the pool 'pool-1' is not open yet"). A closed pool — including one
+        # closed by a previous teardown — is opened here again.
+        if self._pool.closed:
             try:
                 await self._pool.open(wait=True, timeout=15.0)
             except Exception as exc:  # noqa: BLE001 — re-raised after logging
