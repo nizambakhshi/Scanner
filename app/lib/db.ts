@@ -72,6 +72,31 @@ export function isReadTimeout(error: unknown): boolean {
   return error instanceof Error && error.message.startsWith(TIMEOUT_MARK);
 }
 
+/** Long enough for a burst's earlier queries to finish and release their
+ *  slots, short enough that a doomed read still fails promptly. */
+const CAP_RETRY_DELAY_MS = 1000;
+
+/** Supavisor turns away new clients while its session pool is full — a burst
+ *  of cold serverless instances can trip the 15-slot cap and one page load
+ *  comes back as "(EMAXCONNSESSION) max clients reached in session mode". The
+ *  refusal arrives before any statement runs, so retrying carries no risk of
+ *  repeated work. */
+export function isPoolerCapError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("EMAXCONNSESSION");
+}
+
+/** How long to pause before one more attempt, or null when the error is not a
+ *  retryable read problem: immediately for a read that hit the deadline on a
+ *  half-dead socket, a second for a pooler-cap refusal (long enough for a
+ *  burst's earlier queries to finish), and never for writes — their first
+ *  attempt may have reached the server. */
+export function readRetryDelayMs(error: unknown, readOnly: boolean): number | null {
+  if (!readOnly) return null;
+  if (isReadTimeout(error)) return 0;
+  if (isPoolerCapError(error)) return CAP_RETRY_DELAY_MS;
+  return null;
+}
+
 function isTransactionPooler(url: string): boolean {
   return url.includes("pooler.supabase.com") && url.includes(":6543");
 }
@@ -131,18 +156,21 @@ export async function closeDb(): Promise<void> {
 
 /** `SELECT …` with positional parameters, always via `unsafe` so the transaction
  *  pooler never sees a prepared statement it cannot reuse. Every read carries the
- *  deadline above; hitting it retires the pool, and a read-only statement is then
- *  retried once on brand-new sockets — a stalled response on a half-dead
- *  connection is a connection problem, not a query problem. Writes are never
- *  retried: their first attempt may have reached the server before the stall. */
+ *  deadline above; hitting it retires the whole pool, and a read-only statement is
+ *  then retried once on brand-new sockets — a stalled response on a half-dead
+ *  connection is a connection problem, not a query problem. A pooler-cap refusal
+ *  is likewise retried once (after a pause for a slot to free) because it, too,
+ *  is decided before the statement ever runs. Writes are never retried: their
+ *  first attempt may have reached the server. */
 export async function query<T extends Record<string, unknown>>(text: string, params: unknown[] = []): Promise<T[]> {
   const readOnly = /^\s*select\b/i.test(text);
   try {
     return await withReadDeadline(getSql().unsafe<T[]>(text, params as never[]));
   } catch (error) {
-    if (!isReadTimeout(error)) throw error;
+    const delay = readRetryDelayMs(error, readOnly);
+    if (delay === null) throw error;
     retirePool();
-    if (!readOnly) throw error;
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
     return await withReadDeadline(getSql().unsafe<T[]>(text, params as never[]));
   }
 }
