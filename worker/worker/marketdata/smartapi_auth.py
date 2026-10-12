@@ -50,7 +50,10 @@ DEFAULT_HEADERS = {
     "accept": "application/json",
     "content-type": "application/json",
     "x-usertype": "USER",
-    "x-sourceid": "PARDHD",  # official SDK constant for "API" traffic
+    # Verified 2026-10-12 against apiconnect.angelone.in (live login → HTTP 200
+    # with a JWT). "PARDHD" is rejected by Kong with a bodyless HTTP 400 —
+    # "WEB" is the official SDK constant.
+    "x-sourceid": "WEB",
 }
 
 
