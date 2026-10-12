@@ -1130,13 +1130,15 @@ class PostgresStore(ScannerStore):
                 last_completed_candle_at, subscribed_instrument_count,
                 monitored_instrument_count, universe_instrument_count,
                 mapped_instrument_count, active_watchlist_count,
-                pending_notification_count, queue_depth, last_error
+                pending_notification_count, queue_depth, last_error,
+                scan_mode, simulation_label
             ) VALUES (
                 %(worker_id)s, %(status)s, %(feed_status)s, %(last_market_data_at)s,
                 %(last_completed_candle_at)s, %(subscribed_instrument_count)s,
                 %(monitored_instrument_count)s, %(universe_instrument_count)s,
                 %(mapped_instrument_count)s, %(active_watchlist_count)s,
-                %(pending_notification_count)s, %(queue_depth)s, %(last_error)s
+                %(pending_notification_count)s, %(queue_depth)s, %(last_error)s,
+                %(scan_mode)s, %(simulation_label)s
             )
             ON CONFLICT (worker_id) DO UPDATE SET
                 status = EXCLUDED.status,
@@ -1150,7 +1152,9 @@ class PostgresStore(ScannerStore):
                 active_watchlist_count = EXCLUDED.active_watchlist_count,
                 pending_notification_count = EXCLUDED.pending_notification_count,
                 queue_depth = EXCLUDED.queue_depth,
-                last_error = EXCLUDED.last_error
+                last_error = EXCLUDED.last_error,
+                scan_mode = EXCLUDED.scan_mode,
+                simulation_label = EXCLUDED.simulation_label
         """
         params = {
             "worker_id": heartbeat.worker_id,
@@ -1166,6 +1170,8 @@ class PostgresStore(ScannerStore):
             "pending_notification_count": heartbeat.pending_notification_count,
             "queue_depth": heartbeat.queue_depth,
             "last_error": heartbeat.last_error,
+            "scan_mode": heartbeat.scan_mode,
+            "simulation_label": heartbeat.simulation_label,
         }
         await self._execute(sql, params)
 

@@ -357,6 +357,11 @@ class WorkerHeartbeat:
     universe_total: int = 0
     mapped_total: int = 0
     monitored_total: int = 0
+    # §17 honesty rule: a simulated worker must never claim to be live on the
+    # operator dashboard. Defaults match the column defaults so an unwired
+    # construction still round-trips, but the pipeline always sets these.
+    scan_mode: str = "live"
+    simulation_label: bool = False
 
 
 @dataclass(frozen=True)

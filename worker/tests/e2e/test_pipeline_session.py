@@ -479,6 +479,9 @@ async def test_heartbeat_reports_only_observed_progress():
     assert hb.universe_total == 3 and hb.mapped_total == 3
     assert hb.monitored_total == 0 and hb.subscribed_instrument_count == 3
     assert hb.active_watchlist_count == 0 and hb.pending_notification_count == 0
+    # §17 honesty: this pipeline was built with simulation=False, so the row
+    # must claim live — and the reverse must also hold (see the next test).
+    assert hb.scan_mode == "live" and hb.simulation_label is False
 
     await s.connect()
     await s.run_minutes(25)
@@ -496,6 +499,19 @@ async def test_heartbeat_reports_only_observed_progress():
     assert hb.last_market_data_at == minute(24, second=30), (
         "fallback is the newest exchange stamp actually observed"
     )
+
+
+async def test_heartbeat_labels_simulation_runs_as_simulated():
+    # A simulated worker must never report itself live on the operator dashboard
+    # (spec §17: the SimChip and scan_mode cell read these columns directly).
+    rise = inst(1, "RELIANCE")
+    s = await build([rise], {1: rising_ticks(minutes=2)})  # simulation=True default
+    await s.pipeline.publish_heartbeat(
+        worker_id="w1", now=minute(0), subscribed_count=1, last_market_data_at=None
+    )
+    hb = s.store.heartbeats["w1"]
+    assert hb.scan_mode == "simulation"
+    assert hb.simulation_label is True
 
 
 # ── §11.1: initial scan ──────────────────────────────────────────────────────

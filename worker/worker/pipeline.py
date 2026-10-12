@@ -514,6 +514,11 @@ class ScannerPipeline:
                 else len(self.instruments),
                 mapped_total=len(self.instruments),
                 monitored_total=len(self._last_tick_at),
+                # The dashboard's SimChip reads these off the heartbeat row
+                # (v_worker_status); without them a simulation run would report
+                # itself live, which §17 forbids.
+                scan_mode="simulation" if self.is_simulated else "live",
+                simulation_label=self.is_simulated,
             )
         )
 
