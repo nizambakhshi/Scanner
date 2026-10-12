@@ -169,6 +169,18 @@ export function score(value: number | null | undefined): string {
   return value.toFixed(1);
 }
 
+/** An RSI-14 reading: one decimal, because the bands are 60/40 and 59.94 is not 60.0. */
+export function rsi(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  return value.toFixed(1);
+}
+
+/** Crores, the unit Indian market data is quoted in: `1569999` → `₹15,69,999 Cr`. */
+export function crores(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  return `₹${Math.round(value).toLocaleString("en-IN")} Cr`;
+}
+
 export function orDash(value: string | number | null | undefined): string {
   if (value === null || value === undefined || value === "") return "—";
   return String(value);

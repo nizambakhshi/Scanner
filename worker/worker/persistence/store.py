@@ -21,16 +21,21 @@ from ..config import ScannerParams
 from ..models import (
     Candle,
     Channel,
+    DailyCandle,
     DeliveryStatus,
     IndicatorSnapshot,
     Instrument,
     NotificationDelivery,
+    RsiState,
     SectorIndex,
     SectorQuote,
     Signal,
+    StockProfile,
+    StockTechnicals,
     WatchlistEvent,
     WatchlistMembership,
     WatchlistState,
+    WeeklyCandle,
     WorkerHeartbeat,
 )
 
@@ -171,6 +176,66 @@ class ScannerStore(ABC):
 
     @abstractmethod
     async def list_sector_quotes(self) -> list[SectorQuote]: ...
+
+    # ── daily/weekly bars + stock details (two-timeframe RSI, 2026-10-12) ──
+    @abstractmethod
+    async def upsert_daily_candles(self, rows: list[DailyCandle]) -> int:
+        """Newest-wins upsert into ``candles_1d`` (PK instrument + date).
+
+        Re-running the same sync must be free: the sync scripts recompute the
+        recent window every night (it re-fetches it anyway to heal corporate
+        action adjustments), so the write path is one idempotent upsert.
+        """
+
+    @abstractmethod
+    async def upsert_weekly_candles(self, rows: list[WeeklyCandle]) -> int:
+        """Newest-wins upsert into ``candles_1w`` (PK instrument + week start)."""
+
+    @abstractmethod
+    async def load_daily_candles(self, instrument_id: int) -> list[DailyCandle]:
+        """All stored daily bars for one instrument, oldest → newest.
+
+        One instrument at a time, deliberately: the deep history is thousands
+        of rows per symbol and nightly computation needs exactly one symbol's
+        series at once — a load-everything query would materialize hundreds of
+        thousands of rows to use them sequentially.
+        """
+
+    @abstractmethod
+    async def load_weekly_candles(self, instrument_id: int) -> list[WeeklyCandle]: ...
+
+    @abstractmethod
+    async def update_stock_technicals(self, rows: list[StockTechnicals]) -> int:
+        """Upsert the candles-derived columns of ``stock_details``.
+
+        Must not touch the profile columns (pe/mcap/listing) — the two writers
+        own disjoint column sets and can therefore run in either order.
+        """
+
+    @abstractmethod
+    async def upsert_stock_profiles(self, rows: list[StockProfile]) -> int:
+        """Upsert the fundamentals columns of ``stock_details``.
+
+        ``listing_date`` merges with COALESCE: the NSE equity list is the only
+        source for it, so a later Yahoo-only run must not blank it.
+        """
+
+    @abstractmethod
+    async def list_rsi_states(self) -> list[RsiState]:
+        """Every ``stock_details`` row — the worker's RSI-alert input.
+
+        The caller intersects with the configured universe; the table is small
+        (the F&O set), so an unfiltered read with a universe join applied in
+        memory is cheaper than a per-universe SQL variant.
+        """
+
+    @abstractmethod
+    async def set_last_alert_bias(self, instrument_id: int, bias: str) -> None:
+        """Record the bias the engine last acted on for this instrument.
+
+        Also written for NEUTRAL transitions, which are deliberately silent:
+        the column is "what the operator last heard", not "what was bullish".
+        """
 
     @abstractmethod
     async def purge_older_than(self, days: int, *, now: datetime) -> dict[str, int]:

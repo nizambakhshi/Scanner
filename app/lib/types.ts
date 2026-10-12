@@ -105,6 +105,61 @@ export type WatchlistRow = {
   warming_up: boolean;
   latest_candle_at: string | null;
   indicator_snapshot_id: number | null;
+  /** Two-timeframe RSI context from `stock_details` (LEFT JOIN, nullable until
+   *  scanner-sync-daily has run for the instrument). */
+  daily_rsi: number | null;
+  weekly_rsi: number | null;
+  rsi_bias: RsiBias;
+};
+
+/** The two-timeframe classification the operator rule defines (2026-10-12):
+ *  both daily and weekly RSI above 60 → BULLISH, both below 40 → BEARISH,
+ *  the 40–60 band → NEUTRAL. `null` = not classified yet (never silently NEUTRAL). */
+export type RsiBias = "BULLISH" | "BEARISH" | "NEUTRAL" | null;
+
+/**
+ * One row of the /stocks directory: the instrument, its latest daily bar
+ * (the "Price" and daily "Change %"), the fundamentals scanner-sync-profiles
+ * fetched, and the technicals scanner-sync-daily computed. Nulls mean "not
+ * synced yet" and render as dashes — never 0, never an implied value.
+ */
+export type StockOverviewRow = {
+  instrument_id: number;
+  symbol: string;
+  trading_symbol: string;
+  company_name: string | null;
+  exchange: string;
+  /** Newest daily bar (the latest completed session). */
+  last_bar_date: string | null;
+  close: number | null;
+  previous_close: number | null;
+  pe_ratio: number | null;
+  market_cap_cr: number | null;
+  listing_date: string | null;
+  profile_source: string | null;
+  high_52w: number | null;
+  low_52w: number | null;
+  ath: number | null;
+  atl: number | null;
+  data_start: string | null;
+  daily_rsi: number | null;
+  weekly_rsi: number | null;
+  rsi_bias: RsiBias;
+  rsi_as_of: string | null;
+};
+
+/** One point of the per-instrument RSI history (candles_1d.rsi14). */
+export type DailyRsiPoint = {
+  trading_date: string;
+  close: number;
+  rsi14: number;
+};
+
+/** One point of the per-instrument weekly RSI history (candles_1w.rsi14). */
+export type WeeklyRsiPoint = {
+  week_start: string;
+  close: number;
+  rsi14: number;
 };
 
 export type SignalType =
@@ -115,7 +170,9 @@ export type SignalType =
   | "WATCHLIST_REQUALIFIED"
   | "DATA_FEED_INTERRUPTED"
   | "DATA_FEED_RECOVERED"
-  | "DAILY_SCAN_COMPLETE";
+  | "DAILY_SCAN_COMPLETE"
+  | "RSI_BULLISH"
+  | "RSI_BEARISH";
 
 export type SignalRow = {
   id: number;
@@ -311,6 +368,13 @@ export type InstrumentDetail = {
   snapshots: SnapshotRow[];
   events: EventRow[];
   membership: WatchlistRow | null;
+  /** The `stock_details` row — RSI classification, 52W/ATH/ATL, profile. Null
+   *  until the nightly syncs have run for this instrument. */
+  overview: StockOverviewRow | null;
+  /** Daily RSI readings, oldest → newest (the last ~7 sessions). */
+  daily_rsi: DailyRsiPoint[];
+  /** Weekly RSI readings, oldest → newest (the last ~8 ISO weeks). */
+  weekly_rsi: WeeklyRsiPoint[];
 };
 
 export type SignalFilter = {
@@ -336,6 +400,9 @@ export interface ScannerSource {
   config(): Promise<ConfigRow | null>;
   initialScan(): Promise<InitialScanSummary | null>;
   instrument(symbol: string): Promise<InstrumentDetail | null>;
+  /** The /stocks directory: every instrument the worker scans, the newest
+   *  daily bar, the fundamentals and the two-timeframe RSI. */
+  stocksOverview(): Promise<StockOverviewRow[]>;
   deliveries(signalIds: number[]): Promise<DeliveryRow[]>;
   sectorQuotes(): Promise<SectorQuoteRow[]>;
 }

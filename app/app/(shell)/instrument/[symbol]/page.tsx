@@ -2,13 +2,14 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Panel, Metric, ErrorNote, Empty, PageHeading } from "@/components/ui";
 import { SimChip } from "@/components/SimulatedBanner";
-import { StateBadge } from "@/components/badges";
+import { RsiBiasBadge, StateBadge, rsiBandTone } from "@/components/badges";
 import { CandleChart } from "@/components/CandleChart";
 import { EventTimeline } from "@/components/EventTimeline";
 import { SignalsTable } from "@/components/SignalsTable";
-import { clock, dateTime, longDate, multiple, orDash, pct, price, score, shares } from "@/lib/format";
+import { clock, crores, dateTime, longDate, multiple, orDash, pct, price, rsi, score, shares } from "@/lib/format";
 import { ok, panel } from "@/lib/panel";
 import { source } from "@/lib/source";
+import type { RsiBias } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -45,7 +46,7 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
   // A universe row that does not exist is a 404, not a page of dashes: half a
   // symbol page reads as "this one is quiet" rather than "this one is unknown".
   if (!instrument) notFound();
-  const { candles, snapshots, events, membership } = data;
+  const { candles, snapshots, events, membership, overview, daily_rsi, weekly_rsi } = data;
   const last = snapshots[snapshots.length - 1] ?? null;
   const firstCandle = candles[0] ?? null;
   const lastCandle = candles[candles.length - 1] ?? null;
@@ -53,6 +54,17 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
   const low = candles.reduce((best, candle) => Math.min(best, candle.low), Number.POSITIVE_INFINITY);
   const totalVolume = candles.reduce((sum, candle) => sum + candle.volume, 0);
   const rows = ok(signals) ? signals.data : [];
+  // A mapped universe row always has an overview object, but every synced field in
+  // it can still be null — that is "the syncs have not covered it", which deserves
+  // the note, not a grid of dashes.
+  const synced =
+    overview !== null &&
+    (overview.close !== null ||
+      overview.pe_ratio !== null ||
+      overview.market_cap_cr !== null ||
+      overview.high_52w !== null ||
+      overview.daily_rsi !== null ||
+      overview.weekly_rsi !== null);
 
   return (
     <div className="space-y-4">
@@ -77,7 +89,7 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
         }
       />
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
         <Metric
           label="Last"
           value={last ? price(last.close) : "—"}
@@ -105,6 +117,12 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
           label="Score"
           value={last ? score(last.score) : "—"}
           hint={last?.rank ? `initial rank ${last.rank}` : "unranked — ranks come from the initial scan only"}
+        />
+        <Metric
+          label="RSI daily / weekly"
+          value={overview ? `${rsi(overview.daily_rsi)} / ${rsi(overview.weekly_rsi)}` : "—"}
+          hint={overview ? biasHint(overview.rsi_bias) : "no daily/weekly reading synced"}
+          tone={overview?.rsi_bias === "BULLISH" ? "positive" : overview?.rsi_bias === "BEARISH" ? "negative" : "neutral"}
         />
       </div>
 
@@ -196,6 +214,65 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
         </Panel>
       </div>
 
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+        <Panel title="Stock details" hint="from the daily-bar and profile syncs">
+          {synced ? (
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 px-4 py-3 text-[12px]">
+              <span className="text-muted">P/E</span>
+              <span className="num text-right">{overview.pe_ratio === null ? "—" : overview.pe_ratio.toFixed(2)}</span>
+              <span className="text-muted">Market cap</span>
+              <span className="num text-right">{crores(overview.market_cap_cr)}</span>
+              <span className="text-muted">52-week range</span>
+              <span className="num text-right">
+                {price(overview.low_52w)} – {price(overview.high_52w)}
+              </span>
+              <span className="text-muted">All-time high</span>
+              <span className="num text-right">{price(overview.ath)}</span>
+              <span className="text-muted">All-time low</span>
+              <span className="num text-right">{price(overview.atl)}</span>
+              <span className="text-muted">Listed</span>
+              <span className="num text-right">{orDash(overview.listing_date)}</span>
+              <span className="text-muted">Daily bars since</span>
+              <span className="num text-right">{orDash(overview.data_start)}</span>
+              <span className="text-muted">Last synced bar</span>
+              <span className="num text-right">
+                {overview.last_bar_date ? `${overview.last_bar_date} · close ${price(overview.close)}` : "—"}
+              </span>
+              <span className="text-muted">Provider</span>
+              <span className="text-right">{orDash(overview.profile_source)}</span>
+            </div>
+          ) : (
+            <p className="px-4 py-3 text-[12px] text-muted">
+              No synced daily details for this symbol yet — the daily-bar and profile syncs have not covered it. That is
+              a coverage gap, not a stock without a P/E.
+            </p>
+          )}
+        </Panel>
+
+        <Panel
+          title="Two-timeframe RSI"
+          hint="the last seven readings per timeframe — what the RSI alerts classify"
+          action={overview ? <RsiBiasBadge bias={overview.rsi_bias} /> : null}
+        >
+          <div className="grid gap-4 px-4 py-3 sm:grid-cols-2">
+            <RsiReadings
+              heading="Daily"
+              dateLabel="Bar"
+              rows={daily_rsi.map((point) => ({ at: point.trading_date, close: point.close, rsi14: point.rsi14 }))}
+            />
+            <RsiReadings
+              heading="Weekly"
+              dateLabel="Week of"
+              rows={weekly_rsi.map((point) => ({ at: point.week_start, close: point.close, rsi14: point.rsi14 }))}
+            />
+          </div>
+          <p className="border-t border-line px-4 py-2 text-[11px] leading-snug text-muted">
+            Wilder RSI-14 on adjusted closes. BULLISH needs both timeframes above 60, BEARISH both below 40; anything
+            else is neutral. A dash means fewer bars than the 14-period warmup needs — not a reading of zero.
+          </p>
+        </Panel>
+      </div>
+
       <Panel title="This symbol's signals" hint={`${rows.length} row(s)`}>
         {ok(signals) ? <SignalsTable signals={rows} /> : <ErrorNote title="Signal feed unavailable" detail={signals.error} />}
       </Panel>
@@ -269,4 +346,50 @@ function Indicator({ label, value, ok: passes }: { label: string; value: string;
       </td>
     </tr>
   );
+}
+
+/** One timeframe's readings, newest first — the order a reader compares bands in. */
+function RsiReadings({
+  heading,
+  dateLabel,
+  rows,
+}: {
+  heading: string;
+  dateLabel: string;
+  rows: { at: string; close: number; rsi14: number }[];
+}) {
+  return (
+    <div>
+      <p className="pb-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">{heading}</p>
+      {rows.length === 0 ? (
+        <Empty>No readings — the series is shorter than the 14-period warmup.</Empty>
+      ) : (
+        <table className="w-full border-collapse text-[12px]">
+          <thead>
+            <tr className="border-b border-line">
+              <th className="th">{dateLabel}</th>
+              <th className="th text-right">Close</th>
+              <th className="th text-right">RSI-14</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...rows].reverse().map((row) => (
+              <tr key={row.at} className="border-b border-line last:border-0">
+                <td className="td num">{row.at}</td>
+                <td className="td num text-right">{price(row.close)}</td>
+                <td className={`td num text-right ${rsiBandTone(row.rsi14)}`}>{rsi(row.rsi14)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function biasHint(bias: RsiBias): string {
+  if (bias === "BULLISH") return "both timeframes above 60";
+  if (bias === "BEARISH") return "both timeframes below 40";
+  if (bias === "NEUTRAL") return "not on the same side of the 40–60 band";
+  return "not classified yet";
 }

@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Persistent market-data worker: Angel One SmartAPI ticks -> 1-minute candles -> bullish scanner -> watchlist -> Telegram alerts"
 requires-python = ">=3.11"
 dependencies = [
+    "curl_cffi==0.16.3",
     "httpx==0.28.1",
     "psycopg[binary,pool]==3.3.6",
     "pyotp==2.10.0",
@@ -25,6 +26,8 @@ scanner-worker = "worker.main:run"
 scanner-simulate = "worker.simulation.run:main"
 scanner-migrate = "worker.scripts.migrate:main"
 scanner-sync-instruments = "worker.scripts.sync_instruments:main"
+scanner-sync-daily = "worker.scripts.sync_daily:main"
+scanner-sync-profiles = "worker.scripts.sync_profiles:main"
 scanner-dashboard-data = "worker.scripts.export_dashboard_fixture:main"
 
 [tool.setuptools.packages.find]

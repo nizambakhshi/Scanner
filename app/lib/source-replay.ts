@@ -166,7 +166,17 @@ export const replaySource: ScannerSource = {
     const events = (fixture.events ?? []).map(mapEvent).filter((event) => same(event.symbol, key));
     const membership =
       (fixture.watchlist ?? []).map(mapWatchlist).find((watched) => watched.instrument_id === instrument.id) ?? null;
-    return { instrument, candles, snapshots, events, membership };
+    // The fixture exporter predates candles_1d/stock_details; an honestly empty
+    // RSI panel beats a fabricated one (same rule as the sector tile below).
+    return { instrument, candles, snapshots, events, membership, overview: null, daily_rsi: [], weekly_rsi: [] };
+  },
+
+  // The fixture predates the nightly daily-bar/profile syncs and carries no
+  // stock_details rows; the /stocks page shows its empty state under the
+  // replay banner rather than inventing numbers (§19 — coverage is counted,
+  // never implied).
+  async stocksOverview() {
+    return [];
   },
 
   async deliveries(signalIds: number[]) {

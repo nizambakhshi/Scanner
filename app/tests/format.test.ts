@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ago, bool, clock, dateTime, duration, humanise, int, isValidIst, longDate, minutesSince, multiple, num, orDash, pct, price, rowKey, score, shares, strings, toIst } from "@/lib/format";
+import { ago, bool, clock, crores, dateTime, duration, humanise, int, isValidIst, longDate, minutesSince, multiple, num, orDash, pct, price, rowKey, rsi, score, shares, strings, toIst } from "@/lib/format";
 
 test("toIst converts an instant to Asia/Kolkata without touching the caller's timezone", () => {
   // 04:00 UTC is 09:30 IST — the session open, expressed two ways.
@@ -69,9 +69,18 @@ test("a null is never silently a zero", () => {
   assert.equal(multiple(null), "—");
   assert.equal(score(null), "—");
   assert.equal(shares(null), "—");
+  assert.equal(rsi(null), "—");
+  assert.equal(crores(null), "—");
   // 0 is a measurement, and it must print.
   assert.equal(price(0), "₹0.00");
   assert.equal(pct(0), "0.00%");
+});
+
+test("RSI keeps the decimal that decides a band, and market cap speaks crores", () => {
+  assert.equal(rsi(63.25), "63.3");
+  assert.equal(rsi(59.96), "60.0");
+  assert.equal(crores(1569999), "₹15,69,999 Cr");
+  assert.equal(crores(112.4), "₹112 Cr");
 });
 
 test("Indian number formatting and units", () => {

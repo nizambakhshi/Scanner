@@ -14,22 +14,35 @@ import type {
   CandleRow,
   ConfigRow,
   CoverageRow,
+  DailyRsiPoint,
   DeliveryRow,
   EventRow,
   HistoryRow,
   InstrumentRow,
+  RsiBias,
   SignalRow,
   SectorQuoteRow,
   SnapshotRow,
+  StockOverviewRow,
   WatchlistRow,
+  WeeklyRsiPoint,
   WorkerStatusRow,
 } from "./types";
-
 export type Raw = Record<string, unknown>;
 
 const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
 const time = (value: unknown): string | null => toIst(value as string | Date | null);
 const optionalInt = (value: unknown): number | null => (value === null || value === undefined ? null : int(value));
+
+const BIAS_VALUES = new Set(["BULLISH", "BEARISH", "NEUTRAL"]);
+/** The stored classification, or null. Anything unexpected (a stray string, a
+ *  half-written row) must degrade to "not classified" — the UI turns a non-null
+ *  bias into a coloured claim about the stock, so it may only accept the three
+ *  the sync is allowed to write. */
+const bias = (value: unknown): RsiBias => {
+  const raw = value === null || value === undefined ? "" : String(value);
+  return BIAS_VALUES.has(raw) ? (raw as RsiBias) : null;
+};
 
 export function mapCoverage(row: Raw): CoverageRow {
   return {
@@ -106,6 +119,9 @@ export function mapWatchlist(row: Raw): WatchlistRow {
     warming_up: bool(row.warming_up),
     latest_candle_at: time(row.latest_candle_at),
     indicator_snapshot_id: optionalInt(row.indicator_snapshot_id),
+    daily_rsi: num(row.daily_rsi),
+    weekly_rsi: num(row.weekly_rsi),
+    rsi_bias: bias(row.rsi_bias),
   };
 }
 
@@ -295,6 +311,50 @@ export function mapSectorQuote(row: Raw): SectorQuoteRow {
     previous_close: num(row.previous_close),
     change_pct: num(row.change_pct),
     source_updated_at: time(row.source_updated_at),
+  };
+}
+
+export function mapStockOverview(row: Raw): StockOverviewRow {
+  return {
+    instrument_id: int(row.instrument_id),
+    symbol: text(row.symbol) ?? "",
+    trading_symbol: text(row.trading_symbol) ?? "",
+    company_name: text(row.company_name),
+    exchange: text(row.exchange) ?? "",
+    last_bar_date: text(row.last_bar_date),
+    close: num(row.close),
+    previous_close: num(row.previous_close),
+    pe_ratio: num(row.pe_ratio),
+    market_cap_cr: num(row.market_cap_cr),
+    listing_date: text(row.listing_date),
+    profile_source: text(row.profile_source),
+    high_52w: num(row.high_52w),
+    low_52w: num(row.low_52w),
+    ath: num(row.ath),
+    atl: num(row.atl),
+    data_start: text(row.data_start),
+    daily_rsi: num(row.daily_rsi),
+    weekly_rsi: num(row.weekly_rsi),
+    rsi_bias: bias(row.rsi_bias),
+    rsi_as_of: text(row.rsi_as_of),
+  };
+}
+
+/** The SQL filters `rsi14 IS NOT NULL`, so the point is always a real reading;
+ *  the `?? 0` is the same required-number default the candle mapper uses. */
+export function mapDailyRsiPoint(row: Raw): DailyRsiPoint {
+  return {
+    trading_date: text(row.trading_date) ?? "",
+    close: num(row.close) ?? 0,
+    rsi14: num(row.rsi14) ?? 0,
+  };
+}
+
+export function mapWeeklyRsiPoint(row: Raw): WeeklyRsiPoint {
+  return {
+    week_start: text(row.week_start) ?? "",
+    close: num(row.close) ?? 0,
+    rsi14: num(row.rsi14) ?? 0,
   };
 }
 

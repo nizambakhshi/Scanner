@@ -51,6 +51,11 @@ PUSHED_SIGNAL_TYPES = {
     SignalType.DATA_FEED_INTERRUPTED,
     SignalType.DATA_FEED_RECOVERED,
     SignalType.DAILY_SCAN_COMPLETE,
+    # Two-timeframe RSI transitions (operator rule 2026-10-12): once per state
+    # change per session, so the phone ping can never turn into a per-minute
+    # drumbeat the way an every-candle rule would.
+    SignalType.RSI_BULLISH,
+    SignalType.RSI_BEARISH,
 }
 
 COOLDOWN_APPLIED = {
@@ -153,6 +158,8 @@ def _emoji(kind: SignalType) -> str:
         SignalType.DATA_FEED_INTERRUPTED: "⚠️",
         SignalType.DATA_FEED_RECOVERED: "✅",
         SignalType.DAILY_SCAN_COMPLETE: "📊",
+        SignalType.RSI_BULLISH: "📈",
+        SignalType.RSI_BEARISH: "📉",
     }.get(kind, "ℹ️")
 
 
@@ -378,4 +385,4 @@ class AlertEngine:
     def deep_link(self, signal: Signal) -> str | None:
         if not self.app_url or not signal.symbol:
             return None
-        return f"{self.app_url.rstrip('/')}/stocks/{signal.symbol.lower()}"
+        return f"{self.app_url.rstrip('/')}/instrument/{signal.symbol.lower()}"

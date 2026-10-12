@@ -36,6 +36,7 @@ from typing import Any
 
 from .alerts import AlertEngine
 from .analytics.indicators import IndicatorRegistry
+from .analytics.rsi import BEARISH, BULLISH
 from .config import ConfigError, ScannerParams, WorkerSettings, load_settings, safe_summary
 from .dispatcher import Dispatcher
 from .logging_setup import configure_logging, get_logger, scrub
@@ -44,7 +45,15 @@ from .marketdata.sectors import SECTOR_FLUSH_SECONDS, SectorTracker
 from .marketdata.smartapi_auth import SmartApiAuth
 from .marketdata.smartapi_rest import SmartApiRest
 from .marketdata.smartapi_ws import SmartApiFeed
-from .models import FeedStatus, IndexTick, Instrument, SessionStatus, WorkerHeartbeat
+from .models import (
+    FeedStatus,
+    IndexTick,
+    Instrument,
+    RsiState,
+    SessionStatus,
+    SignalType,
+    WorkerHeartbeat,
+)
 from .persistence.memory import InMemoryStore
 from .persistence.postgres import PostgresStore
 from .persistence.store import ScannerStore, SessionRow
@@ -77,6 +86,14 @@ RETENTION_LOOP_SECONDS = 6 * 3600.0
 IDLE_HEARTBEAT_SECONDS = 60.0
 
 
+def _rsi_message(state: RsiState) -> str:
+    """The one-line why for a two-timeframe RSI alert (bias is BULLISH or BEARISH)."""
+    condition = "above 60" if state.rsi_bias == BULLISH else "below 40"
+    daily = f"{state.daily_rsi:.1f}" if state.daily_rsi is not None else "n/a"
+    weekly = f"{state.weekly_rsi:.1f}" if state.weekly_rsi is not None else "n/a"
+    return f"Daily RSI {daily} · weekly RSI {weekly} — both {condition}"
+
+
 @dataclass
 class WorkerRuntime:
     """Owns every coroutine of one worker process."""
@@ -102,6 +119,7 @@ class WorkerRuntime:
     _auth: SmartApiAuth | None = field(default=None, repr=False)
     _rest: SmartApiRest | None = field(default=None, repr=False)
     _sender: TelegramSender | None = field(default=None, repr=False)
+    _alerts: AlertEngine | None = field(default=None, repr=False)
     _universe_total: int = field(default=0, repr=False)
     _recovered_scan_at: datetime | None = field(default=None, repr=False)
     _sectors: SectorTracker | None = field(default=None, repr=False)
@@ -271,6 +289,7 @@ class WorkerRuntime:
             scan_mode=self.settings.scan_mode,
             scanner_config_version=self._config_version,
         )
+        await self._emit_rsi_transitions(self.session, instruments)
         await self._minute_loop(window)
         return 0
 
@@ -403,7 +422,7 @@ class WorkerRuntime:
     def _build_alerts(self) -> AlertEngine:
         telegram = self.settings.telegram
         self._sender = TelegramSender(settings=telegram)
-        return AlertEngine(
+        self._alerts = AlertEngine(
             store=self.store,
             params=self.params,
             telegram_enabled=self.settings.notifications_enabled and telegram.configured,
@@ -411,6 +430,73 @@ class WorkerRuntime:
             app_url=self.settings.app_url,
             simulation=not self.settings.is_live,
         )
+        return self._alerts
+
+    async def _emit_rsi_transitions(
+        self, session: SessionRow, instruments: dict[int, Instrument]
+    ) -> None:
+        """Two-timeframe RSI alerts, one per bias *change*, at session start.
+
+        The operator rule (2026-10-12): daily and weekly RSI both above 60 →
+        BULLISH, both below 40 → BEARISH, the 40–60 band → NEUTRAL. The pair is
+        recomputed nightly by ``scanner-sync-daily`` into ``stock_details``;
+        ``last_alert_bias`` is the bias this worker last acted on. Equal → a
+        standing state, nothing to say. A NULL ``last_alert_bias`` is the first
+        sighting since the feature shipped: the bias is adopted silently, so
+        rollout day does not page the operator once per instrument. Only a
+        transition *into* BULLISH or BEARISH alerts; a transition into NEUTRAL
+        is written quietly as the new baseline so rotating back out of the band
+        later reads as a real change. The (type, instrument, session)
+        idempotency key makes a mid-session restart unable to alert twice.
+        """
+        engine = self._alerts
+        if engine is None:
+            return
+        try:
+            states = await self.store.list_rsi_states()
+        except Exception as exc:  # noqa: BLE001 — a details hiccup must not stop the day
+            log.warning("rsi_states_read_failed", error=scrub(f"{type(exc).__name__}: {exc}"))
+            return
+        counts = {"bullish": 0, "bearish": 0, "neutral": 0, "baselined": 0}
+        for state in states:
+            instrument = instruments.get(state.instrument_id)
+            if instrument is None or state.rsi_bias is None:
+                # Outside today's universe, or a pair the sync could not judge.
+                continue
+            if state.last_alert_bias == state.rsi_bias:
+                continue
+            try:
+                if state.last_alert_bias is None:
+                    counts["baselined"] += 1
+                elif state.rsi_bias in (BULLISH, BEARISH):
+                    bullish = state.rsi_bias == BULLISH
+                    await engine.raise_alert(
+                        signal_type=SignalType.RSI_BULLISH if bullish else SignalType.RSI_BEARISH,
+                        instrument_id=state.instrument_id,
+                        session_id=session.id,
+                        event_timestamp=now_ist(),
+                        symbol=instrument.symbol,
+                        company_name=instrument.company_name,
+                        exchange=instrument.exchange,
+                        previous_close=instrument.previous_close,
+                        reasons=(
+                            ("daily rsi above 60", "weekly rsi above 60")
+                            if bullish
+                            else ("daily rsi below 40", "weekly rsi below 40")
+                        ),
+                        message=_rsi_message(state),
+                    )
+                    counts["bullish" if bullish else "bearish"] += 1
+                else:
+                    counts["neutral"] += 1
+                await self.store.set_last_alert_bias(state.instrument_id, state.rsi_bias)
+            except Exception as exc:  # noqa: BLE001 — one instrument must not sink the rest
+                log.warning(
+                    "rsi_transition_failed",
+                    symbol=instrument.symbol,
+                    error=scrub(f"{type(exc).__name__}: {exc}"),
+                )
+        log.info("rsi_transitions_evaluated", **counts)
 
     # ── feed ──────────────────────────────────────────────────────────────
 
@@ -748,6 +834,7 @@ class WorkerRuntime:
         self._auth = None
         self._rest = None
         self._sender = None
+        self._alerts = None
         self._recovered_scan_at = None
         self._sectors = None
         self.last_market_data_at = None

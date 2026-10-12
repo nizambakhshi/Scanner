@@ -21,7 +21,9 @@ clock.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -30,6 +32,7 @@ from worker.config import ScannerParams
 from worker.models import (
     Candle,
     Channel,
+    DailyCandle,
     DataQuality,
     DeliveryStatus,
     IndicatorSnapshot,
@@ -37,8 +40,11 @@ from worker.models import (
     NotificationDelivery,
     Signal,
     SignalType,
+    StockProfile,
+    StockTechnicals,
     WatchlistEvent,
     WatchlistState,
+    WeeklyCandle,
 )
 from worker.persistence.memory import InMemoryStore
 from worker.persistence.postgres import PostgresStore
@@ -356,6 +362,191 @@ async def test_freeze_session_watchlist_deactivates_memberships(
     assert await store.freeze_session_watchlist(session_id) == 0
 
 
+# ── daily/weekly bars + stock details (two-timeframe RSI) ─────────────────────
+
+
+def make_daily_candle(iid: int, day: date, close: float) -> DailyCandle:
+    return DailyCandle(
+        instrument_id=iid,
+        trading_date=day,
+        open=close - 1.0,
+        high=close + 1.5,
+        low=close - 2.0,
+        close=close,
+        volume=5000,
+        rsi14=61.25,
+    )
+
+
+def make_weekly_candle(iid: int, week: date, close: float) -> WeeklyCandle:
+    return WeeklyCandle(
+        instrument_id=iid,
+        week_start=week,
+        open=close - 5.0,
+        high=close + 6.0,
+        low=close - 7.0,
+        close=close,
+        volume=25000,
+        rsi14=58.5,
+    )
+
+
+async def read_stock_details(store: Any, instrument_id: int) -> dict[str, Any]:
+    """The raw ``stock_details`` row, read through the concrete store.
+
+    The ScannerStore read surface deliberately exposes only what the worker
+    consumes (``list_rsi_states``); these tests reach the row itself to prove
+    the two writers own *disjoint* column sets and the COALESCE rules hold.
+    NUMERIC columns come back as ``Decimal`` from psycopg; converted to float
+    here so both stores present the same types (the store's own mappers use
+    ``_f`` for exactly this reason).
+    """
+    if isinstance(store, InMemoryStore):
+        return dict(store.stock_details.get(instrument_id) or {})
+    sql = "SELECT * FROM stock_details WHERE instrument_id = %s"
+    async with store._pool.connection() as conn, conn.transaction():
+        row = await (await conn.execute(sql, (instrument_id,))).fetchone()
+    if row is None:
+        return {}
+    return {key: _plain(value) for key, value in dict(row).items()}
+
+
+def _plain(value: Any) -> Any:
+    return float(value) if isinstance(value, Decimal) else value
+
+
+async def test_daily_candle_upsert_is_idempotent_per_date(store: Any, instrument_id: int) -> None:
+    first = make_daily_candle(instrument_id, date(2026, 10, 8), close=100.0)
+    second = make_daily_candle(instrument_id, date(2026, 10, 9), close=101.0)
+    assert await store.upsert_daily_candles([second, first]) == 2
+
+    replayed = replace(first, close=100.5, rsi14=62.0)
+    assert await store.upsert_daily_candles([replayed]) == 1
+
+    rows = await store.load_daily_candles(instrument_id)
+    assert [row.trading_date for row in rows] == [date(2026, 10, 8), date(2026, 10, 9)]
+    assert rows[0].close == pytest.approx(100.5), "the replay must update the values"
+    assert rows[0].rsi14 == pytest.approx(62.0)
+    assert rows[0].source == "angel-one-day"
+    assert rows[1].rsi14 == pytest.approx(61.25)
+
+
+async def test_weekly_candle_upsert_is_idempotent_per_week(store: Any, instrument_id: int) -> None:
+    newer = make_weekly_candle(instrument_id, date(2026, 10, 5), close=110.0)
+    older = make_weekly_candle(instrument_id, date(2026, 9, 28), close=105.0)
+    assert await store.upsert_weekly_candles([newer, older]) == 2
+
+    replayed = replace(older, close=106.0, rsi14=57.0)
+    assert await store.upsert_weekly_candles([replayed]) == 1
+
+    rows = await store.load_weekly_candles(instrument_id)
+    assert [row.week_start for row in rows] == [date(2026, 9, 28), date(2026, 10, 5)]
+    assert rows[0].close == pytest.approx(106.0)
+    assert rows[0].rsi14 == pytest.approx(57.0)
+    assert rows[0].source == "resampled-from-candles-1d"
+
+
+async def test_stock_technicals_and_alert_bias_round_trip(store: Any, instrument_id: int) -> None:
+    await store.update_stock_technicals(
+        [
+            StockTechnicals(
+                instrument_id=instrument_id,
+                daily_rsi=63.2,
+                weekly_rsi=61.8,
+                rsi_bias="BULLISH",
+                rsi_as_of=date(2026, 10, 9),
+                data_start=date(2002, 1, 1),
+                high_52w=1700.0,
+                low_52w=1200.0,
+                ath=1700.0,
+                atl=10.0,
+            )
+        ]
+    )
+    states = await store.list_rsi_states()
+    assert len(states) == 1, "one row for one instrument, not one per column"
+    assert states[0].instrument_id == instrument_id
+    assert states[0].daily_rsi == pytest.approx(63.2)
+    assert states[0].weekly_rsi == pytest.approx(61.8)
+    assert states[0].rsi_bias == "BULLISH"
+    assert states[0].last_alert_bias is None, "the worker baselines this, sync never does"
+
+    await store.set_last_alert_bias(instrument_id, "BULLISH")
+    states = await store.list_rsi_states()
+    assert states[0].last_alert_bias == "BULLISH"
+
+    # A nightly refresh rewrites the technicals columns; the alert bookkeeping
+    # column is the worker's and must survive it, and a NULL data_start in the
+    # new row must not blank the stored one (COALESCE).
+    await store.update_stock_technicals(
+        [
+            StockTechnicals(
+                instrument_id=instrument_id,
+                daily_rsi=64.0,
+                weekly_rsi=62.5,
+                rsi_bias="BULLISH",
+                rsi_as_of=date(2026, 10, 10),
+                data_start=None,
+                high_52w=1710.0,
+                low_52w=1200.0,
+                ath=1710.0,
+                atl=10.0,
+            )
+        ]
+    )
+    states = await store.list_rsi_states()
+    assert states[0].daily_rsi == pytest.approx(64.0)
+    assert states[0].last_alert_bias == "BULLISH", "sync must not clobber the worker's column"
+    assert (await read_stock_details(store, instrument_id))["data_start"] == date(2002, 1, 1)
+
+    # Anti-drift parity: setting a bias for a row that does not exist is a
+    # silent no-op (the SQL UPDATE matches zero rows), never an error.
+    await store.set_last_alert_bias(instrument_id + 4242, "BULLISH")
+
+
+async def test_stock_profiles_coalesce_listing_date_across_sources(
+    store: Any, instrument_id: int
+) -> None:
+    await store.upsert_stock_profiles(
+        [
+            StockProfile(
+                instrument_id=instrument_id,
+                pe_ratio=21.5,
+                market_cap_cr=1_569_999.0,
+                listing_date=date(1995, 11, 29),
+                profile_source="yahoo+equity_l",
+            )
+        ]
+    )
+    row = await read_stock_details(store, instrument_id)
+    assert row["pe_ratio"] == pytest.approx(21.5)
+    assert row["market_cap_cr"] == pytest.approx(1_569_999.0)
+    assert row["listing_date"] == date(1995, 11, 29)
+
+    # A Yahoo-only run must refresh its columns but never blank the listing
+    # date: the NSE equity list is the only source for it (COALESCE).
+    await store.upsert_stock_profiles(
+        [
+            StockProfile(
+                instrument_id=instrument_id,
+                pe_ratio=22.1,
+                market_cap_cr=1_600_000.0,
+                listing_date=None,
+                profile_source="yahoo",
+            )
+        ]
+    )
+    row = await read_stock_details(store, instrument_id)
+    assert row["pe_ratio"] == pytest.approx(22.1)
+    assert row["listing_date"] == date(1995, 11, 29)
+    assert row["profile_source"] == "yahoo"
+
+    # The profile writer owns pe/mcap/listing; the technicals columns on the
+    # same row are untouched by it (disjoint write sets, one shared row).
+    states = await store.list_rsi_states()
+    assert states[0].daily_rsi is None, "no technicals were written for this instrument yet"
+
+
 # ── jsonb parameters ──────────────────────────────────────────────────────────
 
 
@@ -368,7 +559,7 @@ async def test_jsonb_columns_round_trip_dicts_and_lists(
     # summary final_watchlist). A feed-less run never reaches these paths, so
     # this test exists to keep them honest on both stores.
     signal = await store.insert_signal(make_signal(instrument_id, session_id, "conf:jsonb:1"))
-    payload = {"text": "BULLISH RELIANCE @ 1234.5", "deep_link": "/stocks/reliance"}
+    payload = {"text": "BULLISH RELIANCE @ 1234.5", "deep_link": "/instrument/reliance"}
     delivery_id = await store.enqueue_notification(
         NotificationDelivery(
             id=None,

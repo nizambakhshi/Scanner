@@ -17,6 +17,8 @@ const TYPES: SignalType[] = [
   "DATA_FEED_INTERRUPTED",
   "DATA_FEED_RECOVERED",
   "DAILY_SCAN_COMPLETE",
+  "RSI_BULLISH",
+  "RSI_BEARISH",
 ];
 
 const LIMITS = [25, 50, 100, 250];

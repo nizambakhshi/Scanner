@@ -84,6 +84,11 @@ class SignalType(StrEnum):
     DATA_FEED_INTERRUPTED = "DATA_FEED_INTERRUPTED"
     DATA_FEED_RECOVERED = "DATA_FEED_RECOVERED"
     DAILY_SCAN_COMPLETE = "DAILY_SCAN_COMPLETE"
+    # Two-timeframe RSI transitions (operator rule 2026-10-12): both daily and
+    # weekly RSI above 60 → BULLISH, both below 40 → BEARISH. Raised only when
+    # the pair *changes* state, never repeatedly for a standing state.
+    RSI_BULLISH = "RSI_BULLISH"
+    RSI_BEARISH = "RSI_BEARISH"
 
 
 class DeliveryStatus(StrEnum):
@@ -221,6 +226,110 @@ class SectorQuote:
     def __post_init__(self) -> None:
         if self.source_updated_at is not None:
             ensure_aware(self.source_updated_at, context="SectorQuote.source_updated_at")
+
+
+@dataclass(frozen=True)
+class DailyCandle:
+    """One adjusted daily OHLCV bar (``candles_1d``).
+
+    ``rsi14`` is the Wilder RSI-14 of this bar's close over the instrument's
+    daily series; it is ``None`` for the first 14 bars of history, where the
+    indicator is not defined. ``source`` records who wrote the bar — daily bars
+    are a one-shot batch fact, not a live stream, so provenance is cheap and
+    useful after a corporate action rewrites history.
+    """
+
+    instrument_id: int
+    trading_date: date
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int
+    rsi14: float | None = None
+    source: str = "angel-one-day"
+
+    def __post_init__(self) -> None:
+        if self.close <= 0:
+            raise ValueError(f"daily close must be positive, got {self.close}")
+        if self.high < self.low:
+            raise ValueError(f"daily high {self.high} below low {self.low}")
+
+
+@dataclass(frozen=True)
+class WeeklyCandle:
+    """One ISO-week bar (``candles_1w``), resampled from daily bars.
+
+    ``week_start`` is the Monday of the week; the newest row may be a partial
+    week whose close is the latest daily close — the value the operator sees on
+    a live chart.
+    """
+
+    instrument_id: int
+    week_start: date
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int
+    rsi14: float | None = None
+    source: str = "resampled-from-candles-1d"
+
+
+@dataclass(frozen=True)
+class StockTechnicals:
+    """The candles-derived half of ``stock_details`` (written by sync-daily).
+
+    A full-history upsert per run: all fields are derived from the same daily
+    series the sync just refreshed, so they always agree with each other.
+    ``data_start`` records how far back the ATH/ATL actually reach — the column
+    is labeled "All Time" but the broker's history begins in 2002, and the
+    dashboard says so rather than implying 1977 for RELIANCE.
+    """
+
+    instrument_id: int
+    daily_rsi: float | None
+    weekly_rsi: float | None
+    rsi_bias: str | None
+    rsi_as_of: date | None
+    data_start: date | None
+    high_52w: float | None
+    low_52w: float | None
+    ath: float | None
+    atl: float | None
+
+
+@dataclass(frozen=True)
+class StockProfile:
+    """The fundamentals half of ``stock_details`` (written by sync-profiles).
+
+    ``profile_source`` names the upstreams that contributed in this run
+    (``"yahoo+equity_l"``); a Yahoo miss must not erase a listing date that the
+    NSE equity list provided, so those two merge per column, not per row.
+    """
+
+    instrument_id: int
+    pe_ratio: float | None
+    market_cap_cr: float | None
+    listing_date: date | None
+    profile_source: str
+
+
+@dataclass(frozen=True)
+class RsiState:
+    """What the worker reads at session start to gate two-timeframe RSI alerts.
+
+    ``rsi_bias`` is the stored classification for the newest synced session;
+    ``last_alert_bias`` is the last bias the worker *alerted on* (or baselined
+    silently). The engine emits a signal only when the two differ, so a stock
+    that sits above 60/60 for weeks alerts once, not every morning.
+    """
+
+    instrument_id: int
+    daily_rsi: float | None
+    weekly_rsi: float | None
+    rsi_bias: str | None
+    last_alert_bias: str | None
 
 
 @dataclass

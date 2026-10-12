@@ -344,9 +344,9 @@ def test_format_message_contains_every_expected_line():
 
 def test_format_message_simulated_banner_and_deep_link():
     # §10.2 banner + configured app deep link are explicit lines.
-    text = format_message(make_signal(is_simulated=True), deep_link=f"{APP_URL}/stocks/reliance")
+    text = format_message(make_signal(is_simulated=True), deep_link=f"{APP_URL}/instrument/reliance")
     assert "SIMULATED — not a live market signal" in text
-    assert text.splitlines()[-1] == "http://localhost:3000/stocks/reliance"
+    assert text.splitlines()[-1] == "http://localhost:3000/instrument/reliance"
 
 
 def test_format_message_falls_back_to_instrument_id_and_skips_missing_fields():
@@ -377,7 +377,7 @@ def test_deep_link_needs_app_url_and_symbol(store, params):
     # never leaks credentials into the link.
     linked = engine_for(store, params, app_url="http://localhost:3000/")
     signal = make_signal(symbol="RELIANCE")
-    assert linked.deep_link(signal) == "http://localhost:3000/stocks/reliance"
+    assert linked.deep_link(signal) == "http://localhost:3000/instrument/reliance"
     bare = engine_for(store, params, app_url="")
     assert bare.deep_link(signal) is None
     assert linked.deep_link(make_signal(symbol=None)) is None

@@ -23,18 +23,23 @@ from ..config import ScannerParams
 from ..models import (
     Candle,
     Channel,
+    DailyCandle,
     DeliveryStatus,
     FeedStatus,
     IndicatorSnapshot,
     Instrument,
     MappingStatus,
     NotificationDelivery,
+    RsiState,
     SectorIndex,
     SectorQuote,
     Signal,
+    StockProfile,
+    StockTechnicals,
     WatchlistEvent,
     WatchlistMembership,
     WatchlistState,
+    WeeklyCandle,
     WorkerHeartbeat,
     is_tracked,
 )
@@ -75,6 +80,14 @@ class InMemoryStore(ScannerStore):
         self.sector_indices: dict[str, SectorIndex] = {}
         self.sector_quotes: dict[str, SectorQuote] = {}
         self.ops_settings: dict[str, dict[str, object]] = {}
+        # candles_1d / candles_1w keyed by (instrument, bar start), newest-wins
+        # exactly like the Postgres PKs. stock_details is one merged column
+        # bag per instrument because the two writers own disjoint columns —
+        # mirroring the single-row-per-instrument table rather than splitting
+        # it and having to re-merge on every read.
+        self.daily_candles: dict[tuple[int, date], DailyCandle] = {}
+        self.weekly_candles: dict[tuple[int, date], WeeklyCandle] = {}
+        self.stock_details: dict[int, dict[str, object]] = {}
         self.connected = False
 
     # ── lifecycle ───────────────────────────────────────────────────────────
@@ -210,6 +223,83 @@ class InMemoryStore(ScannerStore):
 
     async def list_sector_quotes(self) -> list[SectorQuote]:
         return list(self.sector_quotes.values())
+
+    # ── daily/weekly bars + stock details (two-timeframe RSI) ───────────────
+    async def upsert_daily_candles(self, rows: list[DailyCandle]) -> int:
+        for row in rows:
+            self.daily_candles[(row.instrument_id, row.trading_date)] = row
+        return len(rows)
+
+    async def upsert_weekly_candles(self, rows: list[WeeklyCandle]) -> int:
+        for row in rows:
+            self.weekly_candles[(row.instrument_id, row.week_start)] = row
+        return len(rows)
+
+    async def load_daily_candles(self, instrument_id: int) -> list[DailyCandle]:
+        rows = [row for (iid, _), row in self.daily_candles.items() if iid == instrument_id]
+        return sorted(rows, key=lambda row: row.trading_date)
+
+    async def load_weekly_candles(self, instrument_id: int) -> list[WeeklyCandle]:
+        rows = [row for (iid, _), row in self.weekly_candles.items() if iid == instrument_id]
+        return sorted(rows, key=lambda row: row.week_start)
+
+    async def update_stock_technicals(self, rows: list[StockTechnicals]) -> int:
+        for row in rows:
+            detail = self.stock_details.setdefault(row.instrument_id, {})
+            detail.update(
+                {
+                    "daily_rsi": row.daily_rsi,
+                    "weekly_rsi": row.weekly_rsi,
+                    "rsi_bias": row.rsi_bias,
+                    "rsi_as_of": row.rsi_as_of,
+                    # COALESCE semantics, matching the SQL upsert.
+                    "data_start": row.data_start
+                    if row.data_start is not None
+                    else detail.get("data_start"),
+                    "high_52w": row.high_52w,
+                    "low_52w": row.low_52w,
+                    "ath": row.ath,
+                    "atl": row.atl,
+                }
+            )
+        return len(rows)
+
+    async def upsert_stock_profiles(self, rows: list[StockProfile]) -> int:
+        for row in rows:
+            detail = self.stock_details.setdefault(row.instrument_id, {})
+            detail.update(
+                {
+                    "pe_ratio": row.pe_ratio,
+                    "market_cap_cr": row.market_cap_cr,
+                    # COALESCE semantics, matching the SQL upsert: the NSE
+                    # equity list is the only listing-date source, so a
+                    # Yahoo-only run must not blank it.
+                    "listing_date": row.listing_date
+                    if row.listing_date is not None
+                    else detail.get("listing_date"),
+                    "profile_source": row.profile_source,
+                }
+            )
+        return len(rows)
+
+    async def list_rsi_states(self) -> list[RsiState]:
+        return [
+            RsiState(
+                instrument_id=instrument_id,
+                daily_rsi=detail.get("daily_rsi"),
+                weekly_rsi=detail.get("weekly_rsi"),
+                rsi_bias=detail.get("rsi_bias"),
+                last_alert_bias=detail.get("last_alert_bias"),
+            )
+            for instrument_id, detail in sorted(self.stock_details.items())
+        ]
+
+    async def set_last_alert_bias(self, instrument_id: int, bias: str) -> None:
+        detail = self.stock_details.get(instrument_id)
+        # Parity with the SQL UPDATE: a missing row is silently unaffected
+        # (the concrete statement would match zero rows).
+        if detail is not None:
+            detail["last_alert_bias"] = bias
 
     async def purge_older_than(self, days: int, *, now: datetime) -> dict[str, int]:
         cutoff = now - timedelta(days=days)

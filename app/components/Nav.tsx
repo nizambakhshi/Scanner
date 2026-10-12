@@ -8,6 +8,7 @@ import { SignOutButton } from "./SignOutButton";
 const LINKS = [
   { href: "/", label: "Board" },
   { href: "/watchlist", label: "Watchlist" },
+  { href: "/stocks", label: "Stocks" },
   { href: "/signals", label: "Alerts" },
   { href: "/history", label: "Days" },
   { href: "/health", label: "Health" },

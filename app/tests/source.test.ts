@@ -162,6 +162,18 @@ test("an unknown symbol is not found rather than empty", async () => {
   assert.equal(await replaySource.instrument("NOT_A_SYMBOL"), null);
 });
 
+test("the replay sample serves the stocks directory honestly empty", async () => {
+  // The fixture predates candles_1d/stock_details (the nightly syncs); the
+  // /stocks page and the RSI panel show their empty state under the replay
+  // banner rather than fabricated numbers.
+  assert.deepEqual(await replaySource.stocksOverview(), []);
+  const detail = await replaySource.instrument("SIMFADE");
+  assert.ok(detail);
+  assert.equal(detail.overview, null);
+  assert.deepEqual(detail.daily_rsi, []);
+  assert.deepEqual(detail.weekly_rsi, []);
+});
+
 test("deliveries only come back for the signals asked about", async () => {
   const signals = await replaySource.signals({ limit: 5 });
   const ids = signals.map((row) => row.id);

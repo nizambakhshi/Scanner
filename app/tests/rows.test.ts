@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mapCandle, mapConfig, mapCoverage, mapDelivery, mapEvent, mapHistory, mapInstrument, mapSignal, mapSnapshot, mapWatchlist, mapWorker, dateParam } from "../lib/rows";
+import { mapCandle, mapConfig, mapCoverage, mapDailyRsiPoint, mapDelivery, mapEvent, mapHistory, mapInstrument, mapSignal, mapSnapshot, mapStockOverview, mapWatchlist, mapWeeklyRsiPoint, mapWorker, dateParam } from "../lib/rows";
 import { bool, int, jsonRecord, toIst } from "../lib/format";
 
 test("dateParam refuses a malformed date instead of sending it to the database", () => {
@@ -121,4 +121,79 @@ test("candle, event, history and instrument mappers normalise their own rows", (
   const instrument = mapInstrument({ id: 1, exchange: "NSE", symbol: "TITAN", mapping_status: "MAPPED", previous_close: "3400.05", is_nifty500: true });
   assert.equal(instrument.previous_close, 3400.05);
   assert.equal(instrument.is_nifty500, true);
+});
+
+test("the watchlist row carries the two-timeframe RSI, nulls stay null", () => {
+  const withRsi = mapWatchlist({
+    current_state: "ACTIVE",
+    daily_rsi: "63.2500",
+    weekly_rsi: null,
+    rsi_bias: "BULLISH",
+  });
+  assert.equal(withRsi.daily_rsi, 63.25);
+  assert.equal(withRsi.weekly_rsi, null);
+  assert.equal(withRsi.rsi_bias, "BULLISH");
+
+  // No stock_details row (or a half-written one) must read as "not classified".
+  const without = mapWatchlist({ current_state: "ACTIVE", rsi_bias: null });
+  assert.equal(without.daily_rsi, null);
+  assert.equal(without.rsi_bias, null);
+});
+
+test("a bias is only ever the three stored classifications", () => {
+  const ok = mapStockOverview({ instrument_id: 1, rsi_bias: "NEUTRAL" });
+  assert.equal(ok.rsi_bias, "NEUTRAL");
+  // A stray string must degrade to null, not become a coloured claim on screen.
+  const stray = mapStockOverview({ instrument_id: 1, rsi_bias: "bullish" });
+  assert.equal(stray.rsi_bias, null);
+  const empty = mapStockOverview({ instrument_id: 1, rsi_bias: "" });
+  assert.equal(empty.rsi_bias, null);
+});
+
+test("the stock overview maps NUMERIC strings and keeps missing values missing", () => {
+  const row = mapStockOverview({
+    instrument_id: "41",
+    symbol: "RELIANCE",
+    trading_symbol: "RELIANCE-EQ",
+    company_name: "Reliance Industries Limited",
+    exchange: "NSE",
+    last_bar_date: "2026-10-09",
+    close: "1159.1000",
+    previous_close: "1170.5000",
+    pe_ratio: "21.0000",
+    market_cap_cr: "1569999.0000",
+    listing_date: "1995-11-29",
+    profile_source: "yahoo+equity_l",
+    high_52w: "1611.8000",
+    low_52w: "1114.8500",
+    ath: "1611.8000",
+    atl: "9.5000",
+    data_start: "2002-01-01",
+    daily_rsi: "63.2500",
+    weekly_rsi: "61.8400",
+    rsi_bias: "BULLISH",
+    rsi_as_of: "2026-10-09",
+  });
+  assert.equal(row.instrument_id, 41);
+  assert.equal(row.close, 1159.1);
+  assert.equal(row.previous_close, 1170.5);
+  assert.equal(row.pe_ratio, 21);
+  assert.equal(row.market_cap_cr, 1569999);
+  assert.equal(row.listing_date, "1995-11-29");
+  assert.equal(row.daily_rsi, 63.25);
+  assert.equal(row.weekly_rsi, 61.84);
+  assert.equal(row.rsi_bias, "BULLISH");
+
+  const bare = mapStockOverview({ instrument_id: 7, symbol: "NEWCO" });
+  assert.equal(bare.close, null);
+  assert.equal(bare.pe_ratio, null);
+  assert.equal(bare.daily_rsi, null);
+  assert.equal(bare.rsi_bias, null);
+});
+
+test("RSI series points normalise like every other row", () => {
+  const daily = mapDailyRsiPoint({ trading_date: "2026-10-09", close: "1159.10", rsi14: "63.2500" });
+  assert.deepEqual(daily, { trading_date: "2026-10-09", close: 1159.1, rsi14: 63.25 });
+  const weekly = mapWeeklyRsiPoint({ week_start: "2026-10-05", close: "1160.00", rsi14: "61.8400" });
+  assert.deepEqual(weekly, { week_start: "2026-10-05", close: 1160, rsi14: 61.84 });
 });

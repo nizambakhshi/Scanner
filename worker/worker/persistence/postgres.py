@@ -33,18 +33,23 @@ from ..logging_setup import get_logger
 from ..models import (
     Candle,
     Channel,
+    DailyCandle,
     DataQuality,
     DeliveryStatus,
     IndicatorSnapshot,
     Instrument,
     MappingStatus,
     NotificationDelivery,
+    RsiState,
     SectorIndex,
     SectorQuote,
     Signal,
+    StockProfile,
+    StockTechnicals,
     WatchlistEvent,
     WatchlistMembership,
     WatchlistState,
+    WeeklyCandle,
     WorkerHeartbeat,
     is_tracked,
 )
@@ -78,6 +83,9 @@ SCHEMA_TABLES: tuple[str, ...] = (
     "daily_summaries",
     "sector_indices",
     "sector_quotes",
+    "candles_1d",
+    "candles_1w",
+    "stock_details",
 )
 
 # Columns daily_summaries accepts from an arbitrary summary payload.
@@ -149,6 +157,79 @@ ON CONFLICT (exchange, instrument_token) DO UPDATE SET
 _SESSION_SELECT_COLUMNS = """
     id, trading_date, session_status, session_open_at, session_close_at,
     initial_scan_completed_at, finalized_at, stale_data_seconds
+"""
+
+_DAILY_CANDLE_UPSERT = """
+INSERT INTO candles_1d (
+    instrument_id, trading_date, "open", "high", "low", "close", volume, rsi14, source
+) VALUES (
+    %(instrument_id)s, %(trading_date)s, %(open)s, %(high)s, %(low)s,
+    %(close)s, %(volume)s, %(rsi14)s, %(source)s
+)
+ON CONFLICT (instrument_id, trading_date) DO UPDATE SET
+    "open" = EXCLUDED."open",
+    "high" = EXCLUDED."high",
+    "low" = EXCLUDED."low",
+    "close" = EXCLUDED."close",
+    volume = EXCLUDED.volume,
+    rsi14 = EXCLUDED.rsi14,
+    source = EXCLUDED.source
+"""
+
+_WEEKLY_CANDLE_UPSERT = """
+INSERT INTO candles_1w (
+    instrument_id, week_start, "open", "high", "low", "close", volume, rsi14, source
+) VALUES (
+    %(instrument_id)s, %(week_start)s, %(open)s, %(high)s, %(low)s,
+    %(close)s, %(volume)s, %(rsi14)s, %(source)s
+)
+ON CONFLICT (instrument_id, week_start) DO UPDATE SET
+    "open" = EXCLUDED."open",
+    "high" = EXCLUDED."high",
+    "low" = EXCLUDED."low",
+    "close" = EXCLUDED."close",
+    volume = EXCLUDED.volume,
+    rsi14 = EXCLUDED.rsi14,
+    source = EXCLUDED.source
+"""
+
+# The technicals writer owns only its own columns; the profile writer's
+# columns (pe_ratio, market_cap_cr, listing_date) are absent from both the
+# INSERT column list and the DO UPDATE clause, so the two never fight.
+_STOCK_TECHNICALS_UPSERT = """
+INSERT INTO stock_details (
+    instrument_id, daily_rsi, weekly_rsi, rsi_bias, rsi_as_of,
+    data_start, high_52w, low_52w, ath, atl
+) VALUES (
+    %(instrument_id)s, %(daily_rsi)s, %(weekly_rsi)s, %(rsi_bias)s,
+    %(rsi_as_of)s, %(data_start)s, %(high_52w)s, %(low_52w)s, %(ath)s, %(atl)s
+)
+ON CONFLICT (instrument_id) DO UPDATE SET
+    daily_rsi = EXCLUDED.daily_rsi,
+    weekly_rsi = EXCLUDED.weekly_rsi,
+    rsi_bias = EXCLUDED.rsi_bias,
+    rsi_as_of = EXCLUDED.rsi_as_of,
+    data_start = COALESCE(EXCLUDED.data_start, stock_details.data_start),
+    high_52w = EXCLUDED.high_52w,
+    low_52w = EXCLUDED.low_52w,
+    ath = EXCLUDED.ath,
+    atl = EXCLUDED.atl
+"""
+
+_STOCK_PROFILE_UPSERT = """
+INSERT INTO stock_details (
+    instrument_id, pe_ratio, market_cap_cr, listing_date,
+    profile_source, profile_as_of
+) VALUES (
+    %(instrument_id)s, %(pe_ratio)s, %(market_cap_cr)s, %(listing_date)s,
+    %(profile_source)s, now()
+)
+ON CONFLICT (instrument_id) DO UPDATE SET
+    pe_ratio = EXCLUDED.pe_ratio,
+    market_cap_cr = EXCLUDED.market_cap_cr,
+    listing_date = COALESCE(EXCLUDED.listing_date, stock_details.listing_date),
+    profile_source = EXCLUDED.profile_source,
+    profile_as_of = EXCLUDED.profile_as_of
 """
 
 _CONFIG_SELECT_COLUMNS = """
@@ -384,6 +465,44 @@ def _delivery_from_row(row: dict[str, Any]) -> NotificationDelivery:
         provider_message_id=row["provider_message_id"],
         last_error=row["last_error"],
         payload=row["payload"] or {},
+    )
+
+
+def _daily_candle_from_row(row: dict[str, Any]) -> DailyCandle:
+    return DailyCandle(
+        instrument_id=int(row["instrument_id"]),
+        trading_date=row["trading_date"],
+        open=float(row["open"]),
+        high=float(row["high"]),
+        low=float(row["low"]),
+        close=float(row["close"]),
+        volume=int(row["volume"]),
+        rsi14=_f(row["rsi14"]),
+        source=row["source"],
+    )
+
+
+def _weekly_candle_from_row(row: dict[str, Any]) -> WeeklyCandle:
+    return WeeklyCandle(
+        instrument_id=int(row["instrument_id"]),
+        week_start=row["week_start"],
+        open=float(row["open"]),
+        high=float(row["high"]),
+        low=float(row["low"]),
+        close=float(row["close"]),
+        volume=int(row["volume"]),
+        rsi14=_f(row["rsi14"]),
+        source=row["source"],
+    )
+
+
+def _rsi_state_from_row(row: dict[str, Any]) -> RsiState:
+    return RsiState(
+        instrument_id=int(row["instrument_id"]),
+        daily_rsi=_f(row["daily_rsi"]),
+        weekly_rsi=_f(row["weekly_rsi"]),
+        rsi_bias=row["rsi_bias"],
+        last_alert_bias=row["last_alert_bias"],
     )
 
 
@@ -671,6 +790,128 @@ class PostgresStore(ScannerStore):
             )
             for row in rows
         ]
+
+    # ── daily/weekly bars + stock details (two-timeframe RSI) ───────────────
+    async def upsert_daily_candles(self, rows: list[DailyCandle]) -> int:
+        if not rows:
+            return 0
+        params = [
+            {
+                "instrument_id": row.instrument_id,
+                "trading_date": row.trading_date,
+                "open": _r(row.open),
+                "high": _r(row.high),
+                "low": _r(row.low),
+                "close": _r(row.close),
+                "volume": int(row.volume),
+                "rsi14": _r(row.rsi14),
+                "source": row.source,
+            }
+            for row in rows
+        ]
+        async with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await cur.executemany(_DAILY_CANDLE_UPSERT, params)
+        return len(rows)
+
+    async def upsert_weekly_candles(self, rows: list[WeeklyCandle]) -> int:
+        if not rows:
+            return 0
+        params = [
+            {
+                "instrument_id": row.instrument_id,
+                "week_start": row.week_start,
+                "open": _r(row.open),
+                "high": _r(row.high),
+                "low": _r(row.low),
+                "close": _r(row.close),
+                "volume": int(row.volume),
+                "rsi14": _r(row.rsi14),
+                "source": row.source,
+            }
+            for row in rows
+        ]
+        async with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await cur.executemany(_WEEKLY_CANDLE_UPSERT, params)
+        return len(rows)
+
+    async def load_daily_candles(self, instrument_id: int) -> list[DailyCandle]:
+        sql = """
+            SELECT instrument_id, trading_date, "open", "high", "low", "close",
+                   volume, rsi14, source
+            FROM candles_1d
+            WHERE instrument_id = %s
+            ORDER BY trading_date
+        """
+        async with self._pool.connection() as conn, conn.transaction():
+            rows = await (await conn.execute(sql, (instrument_id,))).fetchall()
+        return [_daily_candle_from_row(row) for row in rows]
+
+    async def load_weekly_candles(self, instrument_id: int) -> list[WeeklyCandle]:
+        sql = """
+            SELECT instrument_id, week_start, "open", "high", "low", "close",
+                   volume, rsi14, source
+            FROM candles_1w
+            WHERE instrument_id = %s
+            ORDER BY week_start
+        """
+        async with self._pool.connection() as conn, conn.transaction():
+            rows = await (await conn.execute(sql, (instrument_id,))).fetchall()
+        return [_weekly_candle_from_row(row) for row in rows]
+
+    async def update_stock_technicals(self, rows: list[StockTechnicals]) -> int:
+        if not rows:
+            return 0
+        params = [
+            {
+                "instrument_id": row.instrument_id,
+                "daily_rsi": _r(row.daily_rsi),
+                "weekly_rsi": _r(row.weekly_rsi),
+                "rsi_bias": row.rsi_bias,
+                "rsi_as_of": row.rsi_as_of,
+                "data_start": row.data_start,
+                "high_52w": _r(row.high_52w),
+                "low_52w": _r(row.low_52w),
+                "ath": _r(row.ath),
+                "atl": _r(row.atl),
+            }
+            for row in rows
+        ]
+        async with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await cur.executemany(_STOCK_TECHNICALS_UPSERT, params)
+        return len(rows)
+
+    async def upsert_stock_profiles(self, rows: list[StockProfile]) -> int:
+        if not rows:
+            return 0
+        params = [
+            {
+                "instrument_id": row.instrument_id,
+                "pe_ratio": _r(row.pe_ratio),
+                "market_cap_cr": _r(row.market_cap_cr),
+                "listing_date": row.listing_date,
+                "profile_source": row.profile_source,
+            }
+            for row in rows
+        ]
+        async with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await cur.executemany(_STOCK_PROFILE_UPSERT, params)
+        return len(rows)
+
+    async def list_rsi_states(self) -> list[RsiState]:
+        sql = """
+            SELECT instrument_id, daily_rsi, weekly_rsi, rsi_bias, last_alert_bias
+            FROM stock_details
+            ORDER BY instrument_id
+        """
+        async with self._pool.connection() as conn, conn.transaction():
+            rows = await (await conn.execute(sql)).fetchall()
+        return [_rsi_state_from_row(row) for row in rows]
+
+    async def set_last_alert_bias(self, instrument_id: int, bias: str) -> None:
+        await self._execute(
+            "UPDATE stock_details SET last_alert_bias = %s WHERE instrument_id = %s",
+            (bias, instrument_id),
+        )
 
     # ── sessions ────────────────────────────────────────────────────────────
     async def ensure_session(
