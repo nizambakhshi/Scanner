@@ -39,6 +39,7 @@ export function mapCoverage(row: Raw): CoverageRow {
     ambiguous_count: int(row.ambiguous_count),
     invalid_count: int(row.invalid_count),
     active_universe_count: int(row.active_universe_count),
+    fno_count: int(row.fno_count),
     last_verified_at: time(row.last_verified_at),
   };
 }

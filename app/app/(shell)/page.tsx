@@ -69,7 +69,7 @@ export default async function BoardPage() {
         <Metric
           label="Universe"
           value={counts ? counts.mapped_count : "—"}
-          hint={counts ? `of ${counts.nifty500_count} mapped · ${counts.active_universe_count} active` : "coverage unread"}
+          hint={counts ? `${counts.fno_count} F&O underlyings scanned · of ${counts.nifty500_count} mapped` : "coverage unread"}
         />
         <Metric
           label="Monitored"
@@ -183,6 +183,9 @@ export default async function BoardPage() {
                 </Row>
                 <Row label="Mapped">
                   <span className="num text-positive">{counts.mapped_count}</span>
+                </Row>
+                <Row label="F&O flagged">
+                  <span className="num">{counts.fno_count}</span>
                 </Row>
                 <Row label="Unmapped">
                   <span className={`num ${counts.unmapped_count > 0 ? "text-amber" : ""}`}>{counts.unmapped_count}</span>

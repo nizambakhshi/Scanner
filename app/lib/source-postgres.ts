@@ -46,6 +46,7 @@ const COVERAGE_SQL = `
          ambiguous_count::int AS ambiguous_count,
          invalid_count::int   AS invalid_count,
          active_universe_count::int AS active_universe_count,
+         fno_count::int       AS fno_count,
          last_verified_at     AS last_verified_at
   FROM v_instrument_coverage`;
 

@@ -19,11 +19,13 @@ test("NUMERIC and int8 arrive as strings and must leave as numbers", () => {
     ambiguous_count: null,
     invalid_count: "8",
     active_universe_count: "492",
+    fno_count: "212",
     last_verified_at: new Date("2026-10-12T03:00:00Z"),
   });
   assert.equal(coverage.nifty500_count, 500);
   assert.equal(coverage.mapped_count, 480);
   assert.equal(coverage.ambiguous_count, 0);
+  assert.equal(coverage.fno_count, 212);
   assert.ok(toIst("2026-10-12T03:00:00Z") === coverage.last_verified_at);
 });
 

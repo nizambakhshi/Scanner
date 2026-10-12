@@ -81,10 +81,12 @@ export function getSql(): Pool {
   if (env.databaseUrl === "") throw new Error("DATABASE_URL is not configured");
   const ssl = env.databaseSsl === "disable" ? false : env.databaseSsl === "no-verify" ? { rejectUnauthorized: false } : "require";
   client = postgres(env.databaseUrl, {
-    // A dashboard is a burst reader: one page renders five queries. Keep the
-    // pool small so a busy refresh cannot exhaust Supabase's connection slots
-    // that the worker needs to keep ingesting.
-    max: 4,
+    // A dashboard is a burst reader: one page render fires up to seven queries.
+    // Keep the pool small for two reasons: a busy refresh must not exhaust the
+    // connection slots the worker needs (the session pooler caps clients at 15
+    // and warm serverless instances each hold their sockets open), and the
+    // reads are fast enough that queueing on two sockets is invisible.
+    max: 2,
     idle_timeout: 20,
     connect_timeout: 10,
     // Recycle connections often: on serverless a socket minutes old has almost

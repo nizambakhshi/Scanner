@@ -198,6 +198,7 @@ export default async function HealthPage() {
               {[
                 ["NIFTY500 universe", coverage.data.nifty500_count, ""],
                 ["Mapped", coverage.data.mapped_count, "text-positive"],
+                ["F&O flagged", coverage.data.fno_count, ""],
                 ["Unmapped", coverage.data.unmapped_count, coverage.data.unmapped_count > 0 ? "text-amber" : ""],
                 ["Ambiguous", coverage.data.ambiguous_count, coverage.data.ambiguous_count > 0 ? "text-amber" : ""],
                 ["Invalid", coverage.data.invalid_count, coverage.data.invalid_count > 0 ? "text-negative" : ""],

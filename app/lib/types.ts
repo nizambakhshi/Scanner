@@ -32,6 +32,9 @@ export type CoverageRow = {
   ambiguous_count: number;
   invalid_count: number;
   active_universe_count: number;
+  /** F&O underlyings flagged in the instruments table — the universe the
+   *  worker actually scans when configured for FNO. 0 in replay data. */
+  fno_count: number;
   last_verified_at: string | null;
 };
 

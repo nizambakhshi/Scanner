@@ -29,6 +29,7 @@ import argparse
 import asyncio
 import contextlib
 import signal
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -43,7 +44,7 @@ from .marketdata.sectors import SECTOR_FLUSH_SECONDS, SectorTracker
 from .marketdata.smartapi_auth import SmartApiAuth
 from .marketdata.smartapi_rest import SmartApiRest
 from .marketdata.smartapi_ws import SmartApiFeed
-from .models import FeedStatus, IndexTick, Instrument, SessionStatus
+from .models import FeedStatus, IndexTick, Instrument, SessionStatus, WorkerHeartbeat
 from .persistence.memory import InMemoryStore
 from .persistence.postgres import PostgresStore
 from .persistence.store import ScannerStore, SessionRow
@@ -68,6 +69,12 @@ SHUTDOWN_FLUSH_SECONDS = 20.0
 #: Retention re-runs a few times per session; the startup purge is the one that
 #: actually matters, this only trims what a multi-day uptime accumulates.
 RETENTION_LOOP_SECONDS = 6 * 3600.0
+#: How often a parked worker refreshes its heartbeat row. Between sessions
+#: nothing else writes it, so without this the dashboard keeps displaying the
+#: last session's beat — STREAMING with the old subscription counts — long
+#: after the process stopped feeding (observed 2026-10-12: the board showed a
+#: worker that had died at 13:24 as live until the next open).
+IDLE_HEARTBEAT_SECONDS = 60.0
 
 
 @dataclass
@@ -177,13 +184,48 @@ class WorkerRuntime:
         await self._idle_until(target)
 
     async def _idle_until(self, target: datetime) -> None:
-        """Wait without burning CPU, still responsive to a stop signal."""
+        """Wait without burning CPU, still responsive to a stop signal.
+
+        While parked the worker keeps saying so on the heartbeat row: a process
+        that finished its session must overwrite the last STREAMING beat with
+        an honest idle one, otherwise the dashboard presents it as live until
+        the next open (§17: never let stale data pose as current).
+        """
+        await self._safe_idle_beat()
+        last_beat = time.monotonic()
         while not self.stop.is_set():
             remaining = (to_ist(target) - now_ist()).total_seconds()
             if remaining <= 0:
                 return
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.stop.wait(), timeout=min(remaining, 30.0))
+            if time.monotonic() - last_beat >= IDLE_HEARTBEAT_SECONDS:
+                await self._safe_idle_beat()
+                last_beat = time.monotonic()
+
+    async def _write_idle_heartbeat(self) -> None:
+        """The parked truth: no feed, nothing subscribed, nothing monitored.
+
+        ``last_market_data_at`` is deliberately cleared — this process has seen
+        no ticks while parked, and the health page renders that field next to
+        the row's own age, so "never · updated moments ago" is the honest
+        pairing rather than yesterday's tick next to a fresh timestamp.
+        """
+        await self.store.upsert_heartbeat(
+            WorkerHeartbeat(
+                worker_id=self.settings.worker_id,
+                status=FeedStatus.DISCONNECTED.value,
+                feed_status=FeedStatus.DISCONNECTED,
+                scan_mode=self.settings.scan_mode,
+                simulation_label=self.settings.scan_mode == "simulation",
+            )
+        )
+
+    async def _safe_idle_beat(self) -> None:
+        try:
+            await self._write_idle_heartbeat()
+        except Exception as exc:  # noqa: BLE001 — a heartbeat blip must not kill the wait loop
+            log.warning("idle_heartbeat_failed", error=scrub(f"{type(exc).__name__}: {exc}"))
 
     async def _run_session(self) -> int:
         moment = now_ist()
@@ -623,6 +665,11 @@ class WorkerRuntime:
                     last_error=self.last_error,
                     universe_total=self._universe_total,
                 )
+        # End-of-day honesty: the pipeline beat above still carries the last
+        # feed status; overwrite it with the parked state so an evening glance
+        # reads DISCONNECTED, not STREAMING.
+        with contextlib.suppress(Exception):
+            await self._write_idle_heartbeat()
         for closer in (self._rest, self._auth, self._sender):
             if closer is not None:
                 with contextlib.suppress(Exception):
