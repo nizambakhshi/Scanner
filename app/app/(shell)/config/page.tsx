@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { ConfigEditor } from "@/components/ConfigEditor";
 import { Panel, ErrorNote, Empty, PageHeading } from "@/components/ui";
 import { duration, multiple } from "@/lib/format";
 import { ok, panel } from "@/lib/panel";
@@ -7,13 +8,16 @@ import { source } from "@/lib/source";
 export const dynamic = "force-dynamic";
 
 /**
- * The active scanner configuration, read-only.
+ * The active scanner configuration, with an operator edit path.
  *
  * Each value is shown next to the behaviour it causes, because a bare
  * `relative_volume_threshold: 1.5` tells an operator nothing about why a symbol is
- * missing from the watchlist. The row itself is written by an operator or a
- * migration — this app has no edit path, deliberately: changing what the scanner
- * looks for should be a deploy, not a click on a trading screen.
+ * missing from the watchlist. "Edit values" opens a form for the qualification
+ * and watchlist numbers; saving inserts a NEW versioned `scanner_configs` row
+ * (history is never overwritten) and journals the change. The worker adopts
+ * the newest row when it opens its next session — a save changes what the next
+ * session qualifies on, not what the running session is using, and the form
+ * says so.
  */
 export default async function ConfigPage() {
   const [config, scan] = await Promise.all([panel(() => source().config()), panel(() => source().initialScan())]);
@@ -24,7 +28,7 @@ export default async function ConfigPage() {
     <div className="space-y-4">
       <PageHeading
         title="Configuration"
-        subtitle="The thresholds the scanner judged today's candles against. Read-only by design — this dashboard cannot change what the worker looks for."
+        subtitle="The thresholds the scanner judged today's candles against. Edit values to change what the next session qualifies on — each save is a new versioned row, and the running session keeps what it started with."
         aside={row ? <span className="chip border-line-2 bg-surface-2 text-ink-2">config v{row.config_version} · {row.name}</span> : null}
       />
 
@@ -57,6 +61,7 @@ export default async function ConfigPage() {
                 note={`Last completed candle against the mean of the previous ${row.volume_lookback}. Computed only for symbols with a full window.`}
               />
             </dl>
+            <ConfigEditor row={row} />
           </Panel>
 
           <Panel title="Watchlist behaviour" hint="§11 — how long something stays">
@@ -148,8 +153,9 @@ export default async function ConfigPage() {
             that log in to the exchange and send messages belong to the worker process and are never configured here.
           </li>
           <li className="border-l-2 border-line-2 pl-3">
-            No editing. The thresholds live in <span className="num">scanner_configs</span> and change by migration or
-            by the operator who runs the worker, not from a page that a browser session can reach.
+            No mid-session override. A save writes a new versioned row that the worker reads when it opens its next
+            session — the running session never changes rules under its own feet, and every save is journalled with who
+            made it and what moved.
           </li>
         </ul>
       </Panel>

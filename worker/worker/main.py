@@ -36,7 +36,7 @@ from typing import Any
 
 from .alerts import AlertEngine
 from .analytics.indicators import IndicatorRegistry
-from .config import WorkerSettings, load_settings, safe_summary
+from .config import ConfigError, ScannerParams, WorkerSettings, load_settings, safe_summary
 from .dispatcher import Dispatcher
 from .logging_setup import configure_logging, get_logger, scrub
 from .marketdata.candle_builder import CandleEngine
@@ -91,6 +91,12 @@ class WorkerRuntime:
     window: SessionWindow | None = None
     last_market_data_at: datetime | None = None
     last_error: str | None = None
+    #: The params this session runs on. Starts as the env-derived defaults and
+    #: is replaced by the newest ``scanner_configs`` row when the session opens
+    #: (see :meth:`_adopt_scanner_config`) — the dashboard's edit path writes
+    #: that table, so this field is what makes a saved config actually run.
+    params: ScannerParams = field(init=False)
+    _config_version: int | None = field(default=None, repr=False)
     _tasks: list[asyncio.Task[Any]] = field(default_factory=list, repr=False)
     _lease_holder: str = field(default="", repr=False)
     _auth: SmartApiAuth | None = field(default=None, repr=False)
@@ -99,6 +105,9 @@ class WorkerRuntime:
     _universe_total: int = field(default=0, repr=False)
     _recovered_scan_at: datetime | None = field(default=None, repr=False)
     _sectors: SectorTracker | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        self.params = self.settings.scanner
 
     # ── construction ──────────────────────────────────────────────────────
 
@@ -235,11 +244,12 @@ class WorkerRuntime:
             return 3
         self.window = window
         self.session = await self._resolve_session(window)
+        await self._adopt_scanner_config()
         instruments = await self._load_instruments()
         if not instruments:
             log.error(
                 "empty_universe",
-                universe=self.settings.scanner.universe,
+                universe=self.params.universe,
                 action_required="run `scanner-sync-instruments` before starting the worker",
             )
             return 4
@@ -259,6 +269,7 @@ class WorkerRuntime:
             trading_date=window.trading_date.isoformat(),
             instruments=len(instruments),
             scan_mode=self.settings.scan_mode,
+            scanner_config_version=self._config_version,
         )
         await self._minute_loop(window)
         return 0
@@ -280,12 +291,68 @@ class WorkerRuntime:
             return existing
         return await self.store.ensure_session(window.trading_date, window.open_at, window.close_at)
 
+    async def _adopt_scanner_config(self) -> None:
+        """Run this session on the newest ``scanner_configs`` row, if one exists.
+
+        The dashboard's config page saves versioned rows into that table (every
+        save bumps ``config_version``); adopting it here is what makes "save"
+        mean something — universe filter, qualification thresholds and
+        watchlist behaviour all come from :attr:`params` for the whole session.
+        The env-derived params remain only the fallback for a missing or
+        invalid row, and every decline is logged, never silent.
+
+        Read once per session: a mid-session edit waits for the next session
+        start, because the indicator engines are constructed with the EMA
+        periods and volume lookback they will keep all day (§10.4 — the row is
+        versioned precisely so historical signals stay interpretable).
+        """
+        try:
+            row = await self.store.active_config()
+        except Exception as exc:  # noqa: BLE001 — a config read must never kill the day
+            log.warning(
+                "scanner_config_read_failed",
+                error=scrub(f"{type(exc).__name__}: {exc}")[:200],
+                note="running on env-derived defaults; the saved row was unreadable",
+            )
+            return
+        if row is None:
+            log.info(
+                "scanner_config_fallback",
+                source="env-defaults",
+                note="no scanner_configs row exists; the session runs on the worker's built-in defaults",
+            )
+            return
+        try:
+            row.params.validate()
+        except ConfigError as exc:
+            log.error(
+                "scanner_config_invalid",
+                version=row.config_version,
+                error=scrub(str(exc))[:200],
+                action_required="save a valid config from the dashboard; running on env defaults until then",
+            )
+            return
+        self.params = row.params
+        self._config_version = row.config_version
+        log.info(
+            "scanner_config_adopted",
+            source="scanner_configs",
+            version=row.config_version,
+            universe=row.params.universe,
+            fast_ema_period=row.params.fast_ema_period,
+            slow_ema_period=row.params.slow_ema_period,
+            volume_lookback=row.params.volume_lookback,
+            relative_volume_threshold=row.params.relative_volume_threshold,
+            alert_cooldown_minutes=row.params.alert_cooldown_minutes,
+            removal_confirm_candles=row.params.removal_confirm_candles,
+        )
+
     async def _load_instruments(self) -> dict[int, Instrument]:
-        rows = await self.store.list_universe(universe=self.settings.scanner.universe)
+        rows = await self.store.list_universe(universe=self.params.universe)
         usable = [row for row in rows if row.instrument_token and row.is_active]
         if not usable:
             return {}
-        coverage = await self.store.coverage(universe=self.settings.scanner.universe)
+        coverage = await self.store.coverage(universe=self.params.universe)
         log.info(
             "universe_loaded",
             requested=len(rows),
@@ -301,7 +368,7 @@ class WorkerRuntime:
         session: SessionRow,
         instruments: dict[int, Instrument],
     ) -> ScannerPipeline:
-        params = self.settings.scanner
+        params = self.params
         engine = CandleEngine(
             grace_seconds=params.candle_grace_seconds,
             session_open=window.open_at,
@@ -338,7 +405,7 @@ class WorkerRuntime:
         self._sender = TelegramSender(settings=telegram)
         return AlertEngine(
             store=self.store,
-            params=self.settings.scanner,
+            params=self.params,
             telegram_enabled=self.settings.notifications_enabled and telegram.configured,
             telegram_chat_id=telegram.chat_id,
             app_url=self.settings.app_url,
@@ -400,9 +467,9 @@ class WorkerRuntime:
             index_tokens=index_tokens,
             on_index_tick=self._on_index_tick,
             heartbeat_seconds=min(20.0, float(self.settings.heartbeat_seconds)),
-            stale_after_seconds=float(self.settings.scanner.feed_staleness_seconds),
+            stale_after_seconds=float(self.params.feed_staleness_seconds),
             reconnect_after_seconds=max(
-                90.0, float(self.settings.scanner.feed_staleness_seconds) * 2
+                90.0, float(self.params.feed_staleness_seconds) * 2
             ),
         )
         self.feed = feed
@@ -475,7 +542,7 @@ class WorkerRuntime:
     async def _minute_loop(self, window: SessionWindow) -> None:
         pipeline = self.pipeline
         assert pipeline is not None
-        params = self.settings.scanner
+        params = self.params
         next_scan_at = window.open_at + timedelta(
             minutes=params.initial_scan_candles, seconds=params.candle_grace_seconds + 2
         )
