@@ -331,6 +331,19 @@ async def run(args: argparse.Namespace) -> int:
         instruments = [
             replace(item, is_fno=item.symbol.upper() in fno) for item in result.instruments
         ]
+        if settings.scanner.universe == "FNO":
+            # Operator scope (2026-10-12): the instruments table holds F&O
+            # underlyings only — the NIFTY500-only mappings are deliberately
+            # not stored, so no non-F&O row can re-enter via a re-sync.
+            # Restoring full breadth is a revert of this filter plus a re-sync.
+            before = len(instruments)
+            instruments = [item for item in instruments if item.is_fno]
+            log.info(
+                "scope_filtered",
+                universe="FNO",
+                stored=len(instruments),
+                skipped=before - len(instruments),
+            )
 
         written = await store.upsert_instruments(instruments)
         flagged = await store.set_fno_symbols(fno)
