@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from psycopg.rows import dict_row
+from psycopg.types.json import Json
 from psycopg_pool import AsyncConnectionPool
 
 from ..config import ScannerParams
@@ -233,6 +234,19 @@ def _conninfo_with_tls(database_url: str) -> str:
 def _f(value: Any) -> float | None:
     """psycopg returns Decimal for NUMERIC columns; the domain model is float."""
     return None if value is None else float(value)
+
+
+def _json(value: Any) -> Any:
+    """Wrap dict/list values so psycopg adapts them as jsonb.
+
+    psycopg3 refuses to adapt a bare ``dict`` (ProgrammingError: "cannot
+    adapt type 'dict'") — the PostgresStore conformance run found this on
+    ``scanner_configs.rank_weights`` and ``notification_deliveries.payload``,
+    neither of which a feed-less run ever reaches. Lists destined for jsonb
+    (``daily_summaries.final_watchlist``) need the same wrap; lists for
+    ``TEXT[]`` columns (reasons) must stay bare. None passes through.
+    """
+    return None if value is None else Json(value)
 
 
 def _r(value: float | None, ndigits: int = 4) -> float | None:
@@ -894,7 +908,7 @@ class PostgresStore(ScannerStore):
             "reason": event.reason,
             "price": _r(event.price),
             "indicator_snapshot_id": event.indicator_snapshot_id,
-            "detail": event.detail or {},
+            "detail": _json(event.detail or {}),
         }
         async with self._pool.connection() as conn, conn.transaction():
             row = await (await conn.execute(sql, params)).fetchone()
@@ -1044,7 +1058,7 @@ class PostgresStore(ScannerStore):
             "delivered_at": delivery.delivered_at,
             "provider_message_id": delivery.provider_message_id,
             "last_error": delivery.last_error,
-            "payload": delivery.payload or {},
+            "payload": _json(delivery.payload or {}),
         }
         async with self._pool.connection() as conn, conn.transaction():
             row = await (await conn.execute(sql, params)).fetchone()
@@ -1191,7 +1205,10 @@ class PostgresStore(ScannerStore):
             f"trading_session_id = EXCLUDED.trading_session_id{update_clause}"
         )
         params: dict[str, object] = {"session_id": session_id, "trading_date": trading_date}
-        params.update({column: payload[column] for column in columns})
+        for column in columns:
+            value = payload[column]
+            # jsonb columns (final_watchlist) get the Json wrapper; scalars pass through.
+            params[column] = _json(value) if isinstance(value, (dict, list)) else value
         await self._execute(sql, params)
 
     async def audit(
@@ -1221,8 +1238,8 @@ class PostgresStore(ScannerStore):
             "action": action,
             "entity_type": entity_type,
             "entity_id": entity_id,
-            "previous_value": previous_value,
-            "new_value": new_value,
+            "previous_value": _json(previous_value),
+            "new_value": _json(new_value),
             "request_ip": request_ip,
         }
         await self._execute(sql, params)
@@ -1292,12 +1309,12 @@ def _config_write_params(
         "candle_grace_seconds": params.candle_grace_seconds,
         "initial_scan_candles": params.initial_scan_candles,
         "max_subscribed_instruments": params.max_subscribed_instruments,
-        "rank_weights": {
+        "rank_weights": _json({
             "price_strength": params.rank_weight_price_strength,
             "relative_volume": params.rank_weight_relative_volume,
             "vwap_strength": params.rank_weight_vwap_strength,
             "ema_spread": params.rank_weight_ema_spread,
-        },
+        }),
         "is_enabled": params.is_enabled,
         "config_version": version,
         "created_by": created_by,

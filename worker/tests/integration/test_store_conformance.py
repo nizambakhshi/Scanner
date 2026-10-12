@@ -37,6 +37,7 @@ from worker.models import (
     NotificationDelivery,
     Signal,
     SignalType,
+    WatchlistEvent,
     WatchlistState,
 )
 from worker.persistence.memory import InMemoryStore
@@ -353,3 +354,80 @@ async def test_freeze_session_watchlist_deactivates_memberships(
     assert len(rows) == 1
     assert rows[0].is_active is False, "history is preserved but nothing stays active"
     assert await store.freeze_session_watchlist(session_id) == 0
+
+
+# ── jsonb parameters ──────────────────────────────────────────────────────────
+
+
+async def test_jsonb_columns_round_trip_dicts_and_lists(
+    store: Any, instrument_id: int, session_id: int
+) -> None:
+    # The first real Telegram dispatch exposed psycopg3 refusing to adapt a
+    # bare dict ("cannot adapt type 'dict'") — every jsonb write site had to
+    # get the Json wrapper (notification payload, event detail, audit values,
+    # summary final_watchlist). A feed-less run never reaches these paths, so
+    # this test exists to keep them honest on both stores.
+    signal = await store.insert_signal(make_signal(instrument_id, session_id, "conf:jsonb:1"))
+    payload = {"text": "BULLISH RELIANCE @ 1234.5", "deep_link": "/stocks/reliance"}
+    delivery_id = await store.enqueue_notification(
+        NotificationDelivery(
+            id=None,
+            signal_id=signal.signal_id,
+            channel=Channel.TELEGRAM,
+            destination_reference="@conformance",
+            delivery_status=DeliveryStatus.QUEUED,
+            payload=payload,
+        )
+    )
+    claims = await store.claim_due_notifications(channel=Channel.TELEGRAM, now=minute(11), limit=1)
+    assert [claim.delivery.id for claim in claims] == [delivery_id]
+    assert claims[0].delivery.payload == payload, "payload must come back as a dict, not a string"
+
+    await store.create_membership(
+        session_id,
+        instrument_id,
+        WatchlistState.ACTIVE,
+        entered_at=minute(10),
+        price=100.0,
+        score=0.80,
+        snapshot_id=None,
+        is_simulated=True,
+    )
+    rows = await store.list_memberships(session_id)
+    event_id = await store.add_watchlist_event(
+        WatchlistEvent(
+            watchlist_id=rows[0].id,
+            event_type="STRENGTHENED",
+            previous_state=WatchlistState.WEAKENING,
+            new_state=WatchlistState.ACTIVE,
+            event_timestamp=minute(12),
+            reason="rv recovered",
+            price=101.0,
+            detail={"relative_volume": 2.5},
+        )
+    )
+    assert event_id > 0
+
+    await store.audit(
+        actor="conformance",
+        action="TEST",
+        entity_type="instrument",
+        entity_id=str(instrument_id),
+        previous_value={"rank": 9},
+        new_value={"rank": 3},
+    )
+
+    await store.write_daily_summary(
+        session_id,
+        BASE_DATE,
+        {
+            "qualified_count": 1,
+            "signals_generated": 1,
+            "final_watchlist": [{"symbol": "CONFTEST", "rank": 1, "score": 0.8}],
+        },
+    )
+    await store.write_daily_summary(
+        session_id,
+        BASE_DATE,
+        {"qualified_count": 2, "final_watchlist": []},
+    )
