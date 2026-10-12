@@ -52,6 +52,22 @@ from .feed_protocol import (
 
 log = get_logger(__name__)
 
+
+def connect_smart_stream(url: str, **kwargs: object) -> object:
+    """``websockets.connect`` with the implicit keepalive disabled.
+
+    Live behaviour (2026-10-12): Angel's smart-stream never answers
+    protocol-level ping frames, so the library default (ping every 20 s,
+    pong timeout 20 s) closed our healthy socket every ~40 s with
+    ``1011 keepalive ping timeout``. The docs' heartbeat is a *text*
+    ``ping`` frame — which ``_heartbeat`` already sends — so the socket
+    must not be killed by the binary-ping watchdog.
+    """
+    kwargs.setdefault("ping_interval", None)
+    kwargs.setdefault("ping_timeout", None)
+    return websockets.connect(url, **kwargs)
+
+
 TickHandler = Callable[[Tick], Awaitable[None]]
 StatusHandler = Callable[[FeedStatus, str], Awaitable[None]]
 Resolver = Callable[[str, str], "int | None"]  # (exchange, token) -> instrument_id
@@ -136,7 +152,7 @@ class SmartApiFeed:
         stale_after_seconds: float = 45.0,
         reconnect_after_seconds: float = 90.0,
         policy: ReconnectPolicy | None = None,
-        connect: Callable[..., Awaitable[object]] = websockets.connect,
+        connect: Callable[..., Awaitable[object]] = connect_smart_stream,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not 5.0 <= heartbeat_seconds <= 30.0:

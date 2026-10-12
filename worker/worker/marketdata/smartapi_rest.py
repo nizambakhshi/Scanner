@@ -3,9 +3,11 @@
 Verified request shapes (official docs + SDK, 2026-10-11):
 
 * ``POST /rest/secure/angelbroking/historical/v1/getCandleData``
-  body ``{symboltoken, exchangeType, interval, fromdate, todate}`` with
+  body ``{exchange, symboltoken, interval, fromdate, todate}`` with
   ``fromdate``/``todate`` in ``"YYYY-MM-DD HH:MM"`` **on the IST exchange
-  clock**; rate limit 3/second, 120/minute, 5000/hour.
+  clock**; rate limit 3/second, 120/minute, 5000/hour. (Live-verified
+  2026-10-12: the older documented key ``exchangeType`` is rejected with a
+  bodyless HTTP 400.)
 * ``POST /rest/secure/angelbroking/market/v1/quote``
   body ``{mode: "FULL", exchangeTokens: {NSE: [token, ...]}}`` — the docs prose
   says "50 symbols in one request with 1 request per second" while the rate
@@ -181,6 +183,12 @@ class SmartApiRest:
                 return None
             status = response.status_code
             if status in (401, 403):
+                # Observed live (2026-10-12): Angel answers a throttled client
+                # with HTTP 403 "Access denied because of exceeding access
+                # rate". Renewing the JWT only digs the throttle deeper.
+                if status == 403 and "access rate" in response.text.lower():
+                    log.warning("smartapi_rest_access_rate", path=path)
+                    return None
                 try:
                     await self.auth.force_reauth(f"HTTP {status} on {path}")
                 except Exception as exc:  # noqa: BLE001 - never kill the feed loop
@@ -242,8 +250,11 @@ class SmartApiRest:
                 symboltoken=symboltoken,
             )
         payload = {
+            # Verified live 2026-10-12: the gateway answers the documented
+            # ``exchangeType`` spelling with a bodyless HTTP 400, while the
+            # ``exchange`` key used by the working tracker client returns rows.
+            "exchange": exchange,
             "symboltoken": symboltoken,
-            "exchangeType": exchange,
             "interval": interval,
             "fromdate": angel_rest_stamp(from_ist),
             "todate": angel_rest_stamp(to_ist_dt),
