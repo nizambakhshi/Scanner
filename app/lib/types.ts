@@ -254,6 +254,22 @@ export type InstrumentRow = {
   last_verified_at: string | null;
 };
 
+/**
+ * One chip in the sector tile: the fixed index row LEFT JOINed to its live
+ * quote. A missing quote (`last_price === null`) means the worker has not
+ * flushed yet — the tile shows "waiting", it never invents a price. No
+ * `instrument_token` here either: the browser never needs a broker id.
+ */
+export type SectorQuoteRow = {
+  index_symbol: string;
+  display_name: string;
+  display_order: number;
+  last_price: number | null;
+  previous_close: number | null;
+  change_pct: number | null;
+  source_updated_at: string | null;
+};
+
 export type ConfigRow = {
   id: number;
   name: string;
@@ -318,4 +334,5 @@ export interface ScannerSource {
   initialScan(): Promise<InitialScanSummary | null>;
   instrument(symbol: string): Promise<InstrumentDetail | null>;
   deliveries(signalIds: number[]): Promise<DeliveryRow[]>;
+  sectorQuotes(): Promise<SectorQuoteRow[]>;
 }

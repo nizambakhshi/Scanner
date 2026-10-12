@@ -29,6 +29,8 @@ from ..models import (
     Instrument,
     MappingStatus,
     NotificationDelivery,
+    SectorIndex,
+    SectorQuote,
     Signal,
     WatchlistEvent,
     WatchlistMembership,
@@ -70,6 +72,9 @@ class InMemoryStore(ScannerStore):
         self.leases: dict[str, tuple[str, datetime]] = {}
         self.coverage_counts = CoverageCounts()
         self.subscribed_ids: set[int] = set()
+        self.sector_indices: dict[str, SectorIndex] = {}
+        self.sector_quotes: dict[str, SectorQuote] = {}
+        self.ops_settings: dict[str, dict[str, object]] = {}
         self.connected = False
 
     # ── lifecycle ───────────────────────────────────────────────────────────
@@ -114,6 +119,7 @@ class InMemoryStore(ScannerStore):
             item
             for item in self.instruments.values()
             if (universe != "NIFTY500" or item.is_nifty500)
+            and (universe != "FNO" or item.is_fno)
             and item.is_active
             and (not mapped_only or item.mapping_status == MappingStatus.MAPPED)
         ]
@@ -146,7 +152,12 @@ class InMemoryStore(ScannerStore):
         return count
 
     async def coverage(self, *, universe: str = "NIFTY500") -> CoverageCounts:
-        rows = [item for item in self.instruments.values() if item.is_nifty500 or universe != "NIFTY500"]
+        rows = [
+            item
+            for item in self.instruments.values()
+            if (item.is_nifty500 or universe != "NIFTY500")
+            and (item.is_fno or universe != "FNO")
+        ]
         # ``monitored`` must mean "data actually arrived", not "we asked for it":
         # the Postgres store reads it from the heartbeat, which the pipeline fills
         # from the instruments it has seen ticks for (§5.2 — never imply full
@@ -165,6 +176,53 @@ class InMemoryStore(ScannerStore):
     def set_subscribed(self, instrument_ids: set[int]) -> None:
         """Test/simulation hook mirroring the worker's subscription bookkeeping."""
         self.subscribed_ids = set(instrument_ids)
+
+    async def set_fno_symbols(self, symbols: set[str]) -> int:
+        wanted = {symbol.upper() for symbol in symbols}
+        changed = 0
+        for item in list(self.instruments.values()):
+            if item.exchange != "NSE":
+                continue
+            flag = item.symbol.upper() in wanted
+            if flag != item.is_fno:
+                self.instruments[item.id] = Instrument(**{**item.__dict__, "is_fno": flag})
+                changed += 1
+        return changed
+
+    async def upsert_sector_indices(self, rows: list[SectorIndex]) -> int:
+        self.sector_indices = {row.index_symbol: row for row in rows}
+        return len(rows)
+
+    async def list_sector_indices(self) -> list[SectorIndex]:
+        return sorted(
+            self.sector_indices.values(), key=lambda row: (row.display_order, row.index_symbol)
+        )
+
+    async def upsert_sector_quotes(self, rows: list[SectorQuote]) -> int:
+        writable = [row for row in rows if row.source_updated_at is not None]
+        for row in writable:
+            existing = self.sector_quotes.get(row.index_symbol)
+            # Newest-wins on the exchange clock, matching the Postgres scratchpad.
+            if existing is None or (row.source_updated_at and existing.source_updated_at
+                                    and row.source_updated_at >= existing.source_updated_at):
+                self.sector_quotes[row.index_symbol] = row
+        return len(writable)
+
+    async def list_sector_quotes(self) -> list[SectorQuote]:
+        return list(self.sector_quotes.values())
+
+    async def purge_older_than(self, days: int, *, now: datetime) -> dict[str, int]:
+        cutoff = now - timedelta(days=days)
+        dead_candles = [key for key in self.candles if key[1] < cutoff]
+        for key in dead_candles:
+            del self.candles[key]
+        dead_snapshots = [key for key in self.snapshots if key[1] < cutoff]
+        for key in dead_snapshots:
+            del self.snapshots[key]
+        return {"candles_1m": len(dead_candles), "indicator_snapshots": len(dead_snapshots)}
+
+    async def get_ops_setting(self, key: str) -> dict[str, object] | None:
+        return self.ops_settings.get(key)
 
     # ── sessions ────────────────────────────────────────────────────────────
     async def ensure_session(

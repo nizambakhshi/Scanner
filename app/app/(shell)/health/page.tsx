@@ -1,5 +1,6 @@
 import { Panel, Metric, ErrorNote, Empty, PageHeading } from "@/components/ui";
 import { SimChip } from "@/components/SimulatedBanner";
+import { RetentionPanel } from "@/components/RetentionPanel";
 import { ago, dateTime, duration, orDash } from "@/lib/format";
 import { ok, panel } from "@/lib/panel";
 import { renderNow } from "@/lib/render-time";
@@ -177,6 +178,13 @@ export default async function HealthPage() {
             </table>
           </div>
         )}
+      </Panel>
+
+      <Panel
+        title="Data retention"
+        hint="the one write this dashboard can do, journalled to audit_logs"
+      >
+        <RetentionPanel />
       </Panel>
 
       <div className="grid gap-4 lg:grid-cols-2">

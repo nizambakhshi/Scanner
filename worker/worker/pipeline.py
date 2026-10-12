@@ -237,7 +237,11 @@ class ScannerPipeline:
 
     async def _warm_from_rest(self, instrument_ids: list[int], *, rest: Any, now: datetime) -> int:
         """Pull previous-session 1-minute bars for instruments the DB cannot serve."""
-        window_days = max(3, self.params.warmup_candles_required // 200 + 2)
+        # The REST window is an operator choice (HISTORICAL_WARMUP_DAYS), not a
+        # formula over indicator periods: warmup needs are already satisfied
+        # from the DB, and per-day broker limits are spent here. The getattr
+        # keeps the simulator's light-weight rest doubles working.
+        window_days = max(1, int(getattr(getattr(rest, "settings", None), "historical_warmup_days", 3) or 3))
         from_dt = self.window.open_at - timedelta(days=window_days)
         total = 0
         for instrument_id in instrument_ids:

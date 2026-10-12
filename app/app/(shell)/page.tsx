@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Panel, Metric, Empty, ErrorNote, PageHeading } from "@/components/ui";
 import { SimChip } from "@/components/SimulatedBanner";
+import { SectorTile } from "@/components/SectorTile";
 import { WatchlistTable } from "@/components/WatchlistTable";
 import { SignalsTable } from "@/components/SignalsTable";
 import { ago, clock, duration, longDate, orDash } from "@/lib/format";
@@ -23,13 +24,14 @@ export const dynamic = "force-dynamic";
  * indistinguishable from a screen that has nothing to show.
  */
 export default async function BoardPage() {
-  const [worker, coverage, watchlist, alerts, initialScan, day] = await Promise.all([
+  const [worker, coverage, watchlist, alerts, initialScan, day, sectors] = await Promise.all([
     panel(async () => source().workerStatus()),
     panel(async () => source().coverage()),
     panel(async () => source().currentWatchlist()),
     panel(async () => source().signals({ limit: 12 })),
     panel(async () => source().initialScan()),
     panel(async () => source().history(1)),
+    panel(async () => source().sectorQuotes()),
   ]);
 
   const status = ok(worker) ? worker.data[0] ?? null : null;
@@ -97,6 +99,17 @@ export default async function BoardPage() {
           tone={session && session.stale_data_seconds > 0 ? "amber" : "neutral"}
         />
       </div>
+
+      <Panel
+        title="Nifty sectors"
+        hint="index quotes off the same feed, for context — never a signal"
+      >
+        {ok(sectors) ? (
+          <SectorTile initial={sectors.data} />
+        ) : (
+          <ErrorNote title="Sector quotes unavailable" detail={sectors.error} />
+        )}
+      </Panel>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <Panel

@@ -19,6 +19,7 @@ import type {
   HistoryRow,
   InstrumentRow,
   SignalRow,
+  SectorQuoteRow,
   SnapshotRow,
   WatchlistRow,
   WorkerStatusRow,
@@ -281,6 +282,18 @@ export function mapInstrument(row: Raw): InstrumentRow {
     mapping_status: text(row.mapping_status) ?? "",
     previous_close: num(row.previous_close),
     last_verified_at: time(row.last_verified_at),
+  };
+}
+
+export function mapSectorQuote(row: Raw): SectorQuoteRow {
+  return {
+    index_symbol: text(row.index_symbol) ?? "",
+    display_name: text(row.display_name) ?? "",
+    display_order: int(row.display_order),
+    last_price: num(row.last_price),
+    previous_close: num(row.previous_close),
+    change_pct: num(row.change_pct),
+    source_updated_at: time(row.source_updated_at),
   };
 }
 

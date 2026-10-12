@@ -46,6 +46,7 @@ import asyncio
 import json
 import sys
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 
 from ..config import WorkerSettings, load_settings
@@ -56,6 +57,7 @@ from ..marketdata.instruments import (
     map_universe,
     parse_instrument_master,
 )
+from ..marketdata.sectors import sector_indices_from_master
 from ..marketdata.smartapi_auth import SmartApiAuth
 from ..marketdata.smartapi_rest import SmartApiRest
 from ..models import MappingStatus
@@ -170,6 +172,28 @@ async def collect_previous_closes(
             note="those instruments cannot be evaluated for the intraday change condition",
         )
     return out
+
+
+def fno_underlyings(raw_rows: list[dict[str, object]]) -> set[str]:
+    """F&O stock underlyings from a fresh scrip master.
+
+    NFO stock-derivative rows (``FUTSTK``/``OPTSTK``) carry the underlying in
+    ``name`` — that set *is* the F&O universe, so UNIVERSE=FNO filters on a
+    flag recomputed from the same file the tokens come from, never from a
+    hand-maintained list. Index derivatives (``FUTIDX``/``OPTIDX``) and NSE's
+    test instruments are excluded.
+    """
+    names: set[str] = set()
+    for row in raw_rows:
+        if str(row.get("exch_seg") or "").upper() != "NFO":
+            continue
+        if str(row.get("instrumenttype") or "").upper() not in ("FUTSTK", "OPTSTK"):
+            continue
+        name = str(row.get("name") or "").strip().upper()
+        if not name or name.startswith("NNNSETEST"):
+            continue
+        names.add(name)
+    return names
 
 
 def log_master_shape(raw_rows: list[dict[str, object]], master: list[ScripRow]) -> None:
@@ -299,7 +323,33 @@ async def run(args: argparse.Namespace) -> int:
             )
             return 0
 
-        written = await store.upsert_instruments(result.instruments)
+        # Flag F&O underlyings *before* the upsert so the written rows are
+        # already correct; ``set_fno_symbols`` afterwards sweeps rows this
+        # upsert did not touch (e.g. a stock that dropped out of the universe
+        # but still lingers in the table) in the same pass.
+        fno = fno_underlyings(raw_rows)
+        instruments = [
+            replace(item, is_fno=item.symbol.upper() in fno) for item in result.instruments
+        ]
+
+        written = await store.upsert_instruments(instruments)
+        flagged = await store.set_fno_symbols(fno)
+        sector_rows = sector_indices_from_master(raw_rows)
+        sectors_written = 0
+        if sector_rows is not None:
+            sectors_written = await store.upsert_sector_indices(sector_rows)
+        else:
+            log.warning(
+                "sector_indices_missing",
+                note="AMXIDX rows did not cover every expected index; "
+                "the previous sector_indices table is left untouched",
+            )
+        log.info(
+            "fno_universe",
+            underlyings=len(fno),
+            flag_flips=flagged,
+            sector_indices=sectors_written,
+        )
         # ``map_universe`` assigns no primary key, so the ids quotes map onto
         # must be read back from the database rather than guessed here.
         stored = await store.list_universe(universe=settings.scanner.universe)

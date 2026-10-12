@@ -39,10 +39,11 @@ from .config import WorkerSettings, load_settings, safe_summary
 from .dispatcher import Dispatcher
 from .logging_setup import configure_logging, get_logger, scrub
 from .marketdata.candle_builder import CandleEngine
+from .marketdata.sectors import SECTOR_FLUSH_SECONDS, SectorTracker
 from .marketdata.smartapi_auth import SmartApiAuth
 from .marketdata.smartapi_rest import SmartApiRest
 from .marketdata.smartapi_ws import SmartApiFeed
-from .models import FeedStatus, Instrument, SessionStatus
+from .models import FeedStatus, IndexTick, Instrument, SessionStatus
 from .persistence.memory import InMemoryStore
 from .persistence.postgres import PostgresStore
 from .persistence.store import ScannerStore, SessionRow
@@ -64,6 +65,9 @@ LEASE_NAME = "market-data-session"
 MINUTE_LOOP_SECONDS = 1.0
 CLOSE_GRACE_SECONDS = 45.0
 SHUTDOWN_FLUSH_SECONDS = 20.0
+#: Retention re-runs a few times per session; the startup purge is the one that
+#: actually matters, this only trims what a multi-day uptime accumulates.
+RETENTION_LOOP_SECONDS = 6 * 3600.0
 
 
 @dataclass
@@ -87,6 +91,7 @@ class WorkerRuntime:
     _sender: TelegramSender | None = field(default=None, repr=False)
     _universe_total: int = field(default=0, repr=False)
     _recovered_scan_at: datetime | None = field(default=None, repr=False)
+    _sectors: SectorTracker | None = field(default=None, repr=False)
 
     # ── construction ──────────────────────────────────────────────────────
 
@@ -197,6 +202,7 @@ class WorkerRuntime:
             )
             return 4
         await self.store.set_session_status(self.session.id, SessionStatus.IN_PROGRESS.value)
+        await self._purge_old_data()
         self._ensure_client()
         self.pipeline = self._build_pipeline(window, self.session, instruments)
         warmup = await self.pipeline.warm_up(
@@ -336,12 +342,21 @@ class WorkerRuntime:
                 if instrument.instrument_token
             }
         )
+        # Sector indices ride the same socket and count against the same token
+        # quota, so they subscribe before the quota check below — a refused
+        # stock token is a coverage problem, a refused index token is a tile
+        # that silently stays empty.
+        index_rows = await self.store.list_sector_indices()
+        index_tokens = {row.instrument_token: row.index_symbol for row in index_rows}
+        self._sectors = SectorTracker()
         feed = SmartApiFeed(
             settings=self.settings.angel,
             auth=self._auth,
             resolve=pipeline.resolve_instrument_id,
             on_tick=self._on_tick,
             on_status=self._on_status,
+            index_tokens=index_tokens,
+            on_index_tick=self._on_index_tick,
             heartbeat_seconds=min(20.0, float(self.settings.heartbeat_seconds)),
             stale_after_seconds=float(self.settings.scanner.feed_staleness_seconds),
             reconnect_after_seconds=max(
@@ -349,10 +364,12 @@ class WorkerRuntime:
             ),
         )
         self.feed = feed
-        accepted = await feed.subscribe(tokens)
+        accepted = await feed.subscribe([*tokens, *index_tokens])
         log.info(
             "feed_subscription_planned",
-            requested=len(tokens),
+            requested=len(tokens) + len(index_tokens),
+            stocks=len(tokens),
+            indices=len(index_tokens),
             accepted=accepted,
             quota_remaining=feed.quota_remaining(),
         )
@@ -364,6 +381,10 @@ class WorkerRuntime:
             return
         await pipeline.on_tick(tick)
         self.last_market_data_at = tick.received_at
+
+    async def _on_index_tick(self, tick: IndexTick) -> None:
+        if self._sectors is not None:
+            self._sectors.on_tick(tick)
 
     async def _on_status(self, status: FeedStatus, reason: str) -> None:
         pipeline = self.pipeline
@@ -384,6 +405,11 @@ class WorkerRuntime:
     def _spawn_support_tasks(self) -> None:
         self._tasks.append(asyncio.create_task(self._heartbeat_loop(), name="heartbeat"))
         self._tasks.append(asyncio.create_task(self._lease_loop(), name="lease"))
+        if self._sectors is not None:
+            self._tasks.append(
+                asyncio.create_task(self._sector_flush_loop(), name="sector-flush")
+            )
+        self._tasks.append(asyncio.create_task(self._retention_loop(), name="retention"))
         if self._sender is not None:
             dispatcher = Dispatcher(
                 store=self.store,
@@ -507,11 +533,68 @@ class WorkerRuntime:
             if self.stop.is_set() or self._auth is None:
                 return
             try:
-                await self._auth.force_reauth()
+                await self._auth.force_reauth("scheduled_renewal")
                 log.info("feed_token_renewed")
             except Exception as exc:  # noqa: BLE001
                 self.last_error = f"reauth: {type(exc).__name__}"[:200]
                 log.warning("reauth_failed", error=scrub(str(exc)))
+
+    async def _retention_days(self) -> int:
+        """The ageing window: the dashboard's saved value, or the env default.
+
+        The dashboard owns this knob (``ops_settings['retention'].days``); the
+        worker reads it at purge time rather than caching it at startup, so a
+        change on the dashboard applies without a restart. Anything unreadable
+        falls back to ``RETENTION_DAYS`` and the purge still runs.
+        """
+        fallback = int(self.settings.retention_days)
+        try:
+            setting = await self.store.get_ops_setting("retention")
+        except Exception as exc:  # noqa: BLE001 — a missing table must not stop the purge
+            log.warning("retention_setting_unreadable", error=scrub(f"{type(exc).__name__}: {exc}"))
+            return fallback
+        raw = setting.get("days") if setting else None
+        try:
+            days = int(raw) if raw is not None else fallback  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return fallback
+        return min(30, max(1, days))
+
+    async def _purge_old_data(self) -> None:
+        """Delete candles and snapshots past retention; log what actually went."""
+        days = await self._retention_days()
+        try:
+            counts = await self.store.purge_older_than(days, now=now_ist())
+        except Exception as exc:  # noqa: BLE001 — retention must never stop the session
+            log.warning("retention_purge_failed", error=scrub(f"{type(exc).__name__}: {exc}"))
+            return
+        if any(counts.values()):
+            log.info("retention_purge", retention_days=days, deleted=counts)
+
+    async def _retention_loop(self) -> None:
+        while not self.stop.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.stop.wait(), timeout=RETENTION_LOOP_SECONDS)
+            if self.stop.is_set():
+                continue
+            await self._purge_old_data()
+
+    async def _sector_flush_loop(self) -> None:
+        """Push the tracker's newest-wins buffer into ``sector_quotes`` on a cadence."""
+        tracker = self._sectors
+        assert tracker is not None  # spawned only when the tracker exists
+        while not self.stop.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.stop.wait(), timeout=SECTOR_FLUSH_SECONDS)
+            if self.stop.is_set():
+                continue
+            rows = tracker.drain()
+            if not rows:
+                continue
+            try:
+                await self.store.upsert_sector_quotes(rows)
+            except Exception as exc:  # noqa: BLE001 — the next tick re-dirties the row
+                log.warning("sector_flush_failed", error=scrub(f"{type(exc).__name__}: {exc}"))
 
     async def _teardown_day(self) -> None:
         """Stop every per-session task and release per-session clients.
@@ -552,6 +635,7 @@ class WorkerRuntime:
         self._rest = None
         self._sender = None
         self._recovered_scan_at = None
+        self._sectors = None
         self.last_market_data_at = None
         self.last_error = None
 

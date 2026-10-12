@@ -127,6 +127,10 @@ class Instrument:
     instrument_token: str
     instrument_type: str = "EQ"
     is_nifty500: bool = True
+    # UNIVERSE=FNO filters on this flag (sync recomputes it from the scrip
+    # master's NFO underlyings); NIFTY500 rows keep it False unless they are
+    # also F&O — the flag is additive, not a replacement.
+    is_fno: bool = False
     is_active: bool = True
     mapping_status: MappingStatus = MappingStatus.MAPPED
     last_verified_at: datetime | None = None
@@ -168,6 +172,55 @@ class Tick:
         ensure_aware(self.received_at, context="Tick.received_at")
         if self.last_traded_price is not None and self.last_traded_price <= 0:
             raise ValueError(f"tick price must be positive, got {self.last_traded_price}")
+
+
+@dataclass(frozen=True)
+class IndexTick:
+    """One parsed quote event for an index (the sector tile), not a stock.
+
+    Indices are not scanned, so they never enter the candle pipeline: they are
+    routed straight to the sector tracker. ``previous_close`` is whatever the
+    feed reported — when absent, the change percentage stays ``None`` rather
+    than being inferred from the session open.
+    """
+
+    index_symbol: str
+    instrument_token: str
+    exchange_timestamp: datetime
+    received_at: datetime
+    last_price: float
+    previous_close: float | None = None
+
+    def __post_init__(self) -> None:
+        ensure_aware(self.exchange_timestamp, context="IndexTick.exchange_timestamp")
+        ensure_aware(self.received_at, context="IndexTick.received_at")
+        if self.last_price <= 0:
+            raise ValueError(f"index tick price must be positive, got {self.last_price}")
+
+
+@dataclass(frozen=True)
+class SectorIndex:
+    """A Nifty sector index the feed should subscribe (dashboard tile)."""
+
+    index_symbol: str
+    display_name: str
+    instrument_token: str
+    display_order: int = 0
+
+
+@dataclass(frozen=True)
+class SectorQuote:
+    """The live scratchpad row behind one sector-tile chip."""
+
+    index_symbol: str
+    last_price: float
+    previous_close: float | None = None
+    change_pct: float | None = None
+    source_updated_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if self.source_updated_at is not None:
+            ensure_aware(self.source_updated_at, context="SectorQuote.source_updated_at")
 
 
 @dataclass

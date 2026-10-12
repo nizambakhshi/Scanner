@@ -25,6 +25,8 @@ from ..models import (
     IndicatorSnapshot,
     Instrument,
     NotificationDelivery,
+    SectorIndex,
+    SectorQuote,
     Signal,
     WatchlistEvent,
     WatchlistMembership,
@@ -146,6 +148,48 @@ class ScannerStore(ABC):
 
     @abstractmethod
     async def coverage(self, *, universe: str = "NIFTY500") -> CoverageCounts: ...
+
+    # ── F&O universe + sector tile ─────────────────────────────────────────
+    @abstractmethod
+    async def set_fno_symbols(self, symbols: set[str]) -> int:
+        """Recompute the F&O flag: TRUE exactly for these symbols, FALSE for the rest.
+
+        Sync-time truth, not an increment: every sync run reflects the whole
+        NFO underlying set it just read, so a stock that drops out of F&O is
+        unflagged by the same call that flags the newcomers.
+        """
+
+    @abstractmethod
+    async def upsert_sector_indices(self, rows: list[SectorIndex]) -> int: ...
+
+    @abstractmethod
+    async def list_sector_indices(self) -> list[SectorIndex]: ...
+
+    @abstractmethod
+    async def upsert_sector_quotes(self, rows: list[SectorQuote]) -> int:
+        """Newest-wins upsert; ``sector_quotes`` is a scratchpad, not a log."""
+
+    @abstractmethod
+    async def list_sector_quotes(self) -> list[SectorQuote]: ...
+
+    @abstractmethod
+    async def purge_older_than(self, days: int, *, now: datetime) -> dict[str, int]:
+        """Delete candles and indicator snapshots older than ``days``.
+
+        Returns per-table deleted-row counts keyed by table name, so the log
+        line states what was removed instead of implying it. Watchlist,
+        signal, and summary history is deliberately never purged here — it is
+        the small, interpretable part of the database.
+        """
+
+    @abstractmethod
+    async def get_ops_setting(self, key: str) -> dict[str, object] | None:
+        """Read one row of ``ops_settings`` (the dashboard's operations knobs).
+
+        Returns the ``value`` document or ``None`` when unset — the caller
+        decides the default. The worker only ever reads here; the dashboard is
+        the writer, so the two cannot disagree about what a knob means.
+        """
 
     # ── sessions ───────────────────────────────────────────────────────────
     @abstractmethod

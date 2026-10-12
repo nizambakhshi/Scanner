@@ -23,6 +23,7 @@ import {
   mapEvent,
   mapHistory,
   mapInstrument,
+  mapSectorQuote,
   mapSignal,
   mapSnapshot,
   mapWatchlist,
@@ -210,6 +211,20 @@ const DELIVERIES_SQL = `
   WHERE signal_id = ANY($1::int[])
   ORDER BY id`;
 
+/** Sector tile: the fixed index list LEFT JOINed to its newest quote. The LEFT
+ *  JOIN is deliberate — an index the worker has not flushed yet still renders
+ *  as "waiting" instead of silently vanishing from the tile. No broker token
+ *  leaves the database (§19). */
+const SECTOR_SQL = `
+  SELECT si.index_symbol, si.display_name, si.display_order::int AS display_order,
+         sq.last_price::float8     AS last_price,
+         sq.previous_close::float8 AS previous_close,
+         sq.change_pct::float8     AS change_pct,
+         sq.source_updated_at
+  FROM sector_indices si
+  LEFT JOIN sector_quotes sq ON sq.index_symbol = si.index_symbol
+  ORDER BY si.display_order, si.index_symbol`;
+
 function limit(value: number | undefined, max: number): number {
   return Math.min(Math.max(Math.trunc(value ?? max), 1), max);
 }
@@ -286,5 +301,9 @@ export const postgresSource: ScannerSource = {
     const ids = signalIds.map((id) => Math.trunc(id)).filter((id) => Number.isFinite(id));
     if (ids.length === 0) return [];
     return (await query<Raw>(DELIVERIES_SQL, [ids])).map(mapDelivery);
+  },
+
+  async sectorQuotes() {
+    return (await query<Raw>(SECTOR_SQL)).map(mapSectorQuote);
   },
 };

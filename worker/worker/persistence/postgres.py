@@ -39,6 +39,8 @@ from ..models import (
     Instrument,
     MappingStatus,
     NotificationDelivery,
+    SectorIndex,
+    SectorQuote,
     Signal,
     WatchlistEvent,
     WatchlistMembership,
@@ -74,6 +76,8 @@ SCHEMA_TABLES: tuple[str, ...] = (
     "audit_logs",
     "worker_leases",
     "daily_summaries",
+    "sector_indices",
+    "sector_quotes",
 )
 
 # Columns daily_summaries accepts from an arbitrary summary payload.
@@ -122,12 +126,12 @@ ON CONFLICT (instrument_id, candle_start_at) DO UPDATE SET
 _INSTRUMENT_UPSERT = """
 INSERT INTO instruments (
     exchange, symbol, trading_symbol, company_name, instrument_token,
-    instrument_type, is_nifty500, is_active, mapping_status,
+    instrument_type, is_nifty500, is_fno, is_active, mapping_status,
     last_verified_at, previous_close
 ) VALUES (
     %(exchange)s, %(symbol)s, %(trading_symbol)s, %(company_name)s,
-    %(instrument_token)s, %(instrument_type)s, %(is_nifty500)s, %(is_active)s,
-    %(mapping_status)s, %(last_verified_at)s, %(previous_close)s
+    %(instrument_token)s, %(instrument_type)s, %(is_nifty500)s, %(is_fno)s,
+    %(is_active)s, %(mapping_status)s, %(last_verified_at)s, %(previous_close)s
 )
 ON CONFLICT (exchange, instrument_token) DO UPDATE SET
     symbol = EXCLUDED.symbol,
@@ -135,6 +139,7 @@ ON CONFLICT (exchange, instrument_token) DO UPDATE SET
     company_name = COALESCE(EXCLUDED.company_name, instruments.company_name),
     instrument_type = EXCLUDED.instrument_type,
     is_nifty500 = EXCLUDED.is_nifty500,
+    is_fno = EXCLUDED.is_fno,
     is_active = EXCLUDED.is_active,
     mapping_status = EXCLUDED.mapping_status,
     last_verified_at = COALESCE(EXCLUDED.last_verified_at, instruments.last_verified_at),
@@ -268,6 +273,9 @@ def _instrument_from_row(row: dict[str, Any]) -> Instrument:
         instrument_token=row["instrument_token"],
         instrument_type=row["instrument_type"],
         is_nifty500=bool(row["is_nifty500"]),
+        # ``.get`` so a read against a not-yet-migrated database degrades to
+        # "not in the F&O set" instead of raising KeyError in the hot path.
+        is_fno=bool(row.get("is_fno", False)),
         is_active=bool(row["is_active"]),
         mapping_status=MappingStatus(row["mapping_status"]),
         last_verified_at=row["last_verified_at"],
@@ -459,6 +467,7 @@ class PostgresStore(ScannerStore):
                 "instrument_token": item.instrument_token,
                 "instrument_type": item.instrument_type,
                 "is_nifty500": item.is_nifty500,
+                "is_fno": item.is_fno,
                 "is_active": item.is_active,
                 "mapping_status": item.mapping_status.value,
                 "last_verified_at": item.last_verified_at,
@@ -473,14 +482,21 @@ class PostgresStore(ScannerStore):
     async def list_universe(
         self, *, universe: str = "NIFTY500", mapped_only: bool = True
     ) -> list[Instrument]:
+        # UNIVERSE=FNO selects the derivative underlyings (is_fno), not the
+        # index membership flag — the two universes are independent columns.
         sql = """
             SELECT * FROM instruments
             WHERE (%(only_500)s IS FALSE OR is_nifty500)
+              AND (%(fno_only)s IS FALSE OR is_fno)
               AND is_active
               AND (%(mapped_only)s IS FALSE OR mapping_status = 'MAPPED')
             ORDER BY symbol
         """
-        params = {"only_500": universe == "NIFTY500", "mapped_only": mapped_only}
+        params = {
+            "only_500": universe == "NIFTY500",
+            "fno_only": universe == "FNO",
+            "mapped_only": mapped_only,
+        }
         async with self._pool.connection() as conn, conn.transaction():
             rows = await (await conn.execute(sql, params)).fetchall()
         return [_instrument_from_row(row) for row in rows]
@@ -524,6 +540,7 @@ class PostgresStore(ScannerStore):
                 COUNT(*) FILTER (WHERE mapping_status = 'INVALID')::int  AS invalid_total
             FROM instruments
             WHERE (%(only_500)s IS FALSE OR is_nifty500)
+              AND (%(fno_only)s IS FALSE OR is_fno)
         """
         heartbeat_sql = """
             SELECT subscribed_instrument_count, monitored_instrument_count
@@ -533,7 +550,10 @@ class PostgresStore(ScannerStore):
         """
         async with self._pool.connection() as conn, conn.transaction():
             totals = await (
-                await conn.execute(aggregate_sql, {"only_500": universe == "NIFTY500"})
+                await conn.execute(
+                    aggregate_sql,
+                    {"only_500": universe == "NIFTY500", "fno_only": universe == "FNO"},
+                )
             ).fetchone()
             heartbeat = await (await conn.execute(heartbeat_sql)).fetchone()
         counts = CoverageCounts(
@@ -546,6 +566,111 @@ class PostgresStore(ScannerStore):
             invalid_total=int(totals["invalid_total"]),
         )
         return counts
+
+    async def set_fno_symbols(self, symbols: set[str]) -> int:
+        upper = sorted({symbol.upper() for symbol in symbols})
+        # One statement flips both directions: rows entering the set go TRUE,
+        # rows that left it go FALSE. The IS DISTINCT FROM guard means the
+        # rowcount reports real transitions, and re-running a sync is free.
+        sql = """
+            UPDATE instruments
+            SET is_fno = (upper(symbol) = ANY(%(symbols)s))
+            WHERE exchange = 'NSE'
+              AND is_fno IS DISTINCT FROM (upper(symbol) = ANY(%(symbols)s))
+        """
+        async with self._pool.connection() as conn, conn.transaction():
+            result = await conn.execute(sql, {"symbols": upper})
+            return int(result.rowcount)
+
+    async def upsert_sector_indices(self, rows: list[SectorIndex]) -> int:
+        if not rows:
+            return 0
+        sql = """
+            INSERT INTO sector_indices (index_symbol, display_name, instrument_token, display_order)
+            VALUES (%(index_symbol)s, %(display_name)s, %(instrument_token)s, %(display_order)s)
+            ON CONFLICT (index_symbol) DO UPDATE SET
+                display_name = EXCLUDED.display_name,
+                instrument_token = EXCLUDED.instrument_token,
+                display_order = EXCLUDED.display_order
+        """
+        params = [
+            {
+                "index_symbol": item.index_symbol,
+                "display_name": item.display_name,
+                "instrument_token": item.instrument_token,
+                "display_order": item.display_order,
+            }
+            for item in rows
+        ]
+        async with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await cur.executemany(sql, params)
+        return len(rows)
+
+    async def list_sector_indices(self) -> list[SectorIndex]:
+        sql = """
+            SELECT index_symbol, display_name, instrument_token, display_order
+            FROM sector_indices
+            ORDER BY display_order, index_symbol
+        """
+        async with self._pool.connection() as conn, conn.transaction():
+            rows = await (await conn.execute(sql)).fetchall()
+        return [
+            SectorIndex(
+                index_symbol=row["index_symbol"],
+                display_name=row["display_name"],
+                instrument_token=str(row["instrument_token"]),
+                display_order=int(row["display_order"]),
+            )
+            for row in rows
+        ]
+
+    async def upsert_sector_quotes(self, rows: list[SectorQuote]) -> int:
+        # ``source_updated_at`` is NOT NULL in the schema; a quote without it
+        # carries no trustworthy freshness, so it is dropped rather than
+        # back-dated — a stale tile must look stale.
+        writable = [row for row in rows if row.source_updated_at is not None]
+        if not writable:
+            return 0
+        sql = """
+            INSERT INTO sector_quotes (index_symbol, last_price, previous_close, change_pct, source_updated_at)
+            VALUES (%(index_symbol)s, %(last_price)s, %(previous_close)s, %(change_pct)s, %(source_updated_at)s)
+            ON CONFLICT (index_symbol) DO UPDATE SET
+                last_price = EXCLUDED.last_price,
+                previous_close = EXCLUDED.previous_close,
+                change_pct = EXCLUDED.change_pct,
+                source_updated_at = EXCLUDED.source_updated_at
+        """
+        params = [
+            {
+                "index_symbol": row.index_symbol,
+                "last_price": _r(row.last_price),
+                "previous_close": _r(row.previous_close),
+                "change_pct": _r(row.change_pct),
+                "source_updated_at": row.source_updated_at,
+            }
+            for row in writable
+        ]
+        async with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await cur.executemany(sql, params)
+        return len(writable)
+
+    async def list_sector_quotes(self) -> list[SectorQuote]:
+        sql = """
+            SELECT index_symbol, last_price, previous_close, change_pct, source_updated_at
+            FROM sector_quotes
+        """
+        async with self._pool.connection() as conn, conn.transaction():
+            rows = await (await conn.execute(sql)).fetchall()
+        return [
+            SectorQuote(
+                index_symbol=row["index_symbol"],
+                last_price=float(row["last_price"]),
+                previous_close=_f(row["previous_close"]),
+                change_pct=_f(row["change_pct"]),
+                source_updated_at=row["source_updated_at"],
+            )
+            for row in rows
+        ]
 
     # ── sessions ────────────────────────────────────────────────────────────
     async def ensure_session(
@@ -1277,6 +1402,34 @@ class PostgresStore(ScannerStore):
                 await conn.execute(_RELEASE_LEASE_SQL, {"name": name, "holder": holder})
             ).fetchone()
         return row is not None
+
+    async def purge_older_than(self, days: int, *, now: datetime) -> dict[str, int]:
+        cutoff = now - timedelta(days=days)
+        deleted: dict[str, int] = {}
+        # Both hot tables in one transaction: a reader can never observe a
+        # state where candles were trimmed but the snapshots built from them
+        # (or vice versa) are still there.
+        async with self._pool.connection() as conn, conn.transaction():
+            result = await conn.execute(
+                "DELETE FROM candles_1m WHERE candle_start_at < %s", (cutoff,)
+            )
+            deleted["candles_1m"] = int(result.rowcount)
+            result = await conn.execute(
+                "DELETE FROM indicator_snapshots WHERE candle_start_at < %s", (cutoff,)
+            )
+            deleted["indicator_snapshots"] = int(result.rowcount)
+        return deleted
+
+    async def get_ops_setting(self, key: str) -> dict[str, object] | None:
+        async with self._pool.connection() as conn, conn.transaction():
+            row = await (
+                await conn.execute(
+                    "SELECT value FROM ops_settings WHERE key = %s", (key,)
+                )
+            ).fetchone()
+        if row is None or not isinstance(row["value"], dict):
+            return None
+        return dict(row["value"])
 
     # ── test helper ─────────────────────────────────────────────────────────
     async def truncate_all(self, *, allow: bool = False) -> None:

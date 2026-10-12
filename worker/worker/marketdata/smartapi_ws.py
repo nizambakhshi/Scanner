@@ -36,7 +36,7 @@ import websockets
 
 from ..config import AngelSettings
 from ..logging_setup import get_logger, scrub
-from ..models import FeedStatus, Tick
+from ..models import FeedStatus, IndexTick, Tick
 from ..timeutils import now_ist
 from .feed_protocol import (
     FeedDecodeError,
@@ -69,6 +69,7 @@ def connect_smart_stream(url: str, **kwargs: object) -> object:
 
 
 TickHandler = Callable[[Tick], Awaitable[None]]
+IndexTickHandler = Callable[[IndexTick], Awaitable[None]]
 StatusHandler = Callable[[FeedStatus, str], Awaitable[None]]
 Resolver = Callable[[str, str], "int | None"]  # (exchange, token) -> instrument_id
 
@@ -148,6 +149,8 @@ class SmartApiFeed:
         resolve: Resolver,
         on_tick: TickHandler,
         on_status: StatusHandler | None = None,
+        index_tokens: dict[str, str] | None = None,
+        on_index_tick: IndexTickHandler | None = None,
         heartbeat_seconds: float = HEARTBEAT_INTERVAL_SECONDS,
         stale_after_seconds: float = 45.0,
         reconnect_after_seconds: float = 90.0,
@@ -164,6 +167,11 @@ class SmartApiFeed:
         self.resolve = resolve
         self.on_tick = on_tick
         self.on_status = on_status
+        # token → index_symbol. Index frames never reach the stock resolver:
+        # indices have no instrument row, so routing them there would silently
+        # drop them as "not in this universe".
+        self._index_tokens: dict[str, str] = dict(index_tokens or {})
+        self.on_index_tick = on_index_tick
         self.heartbeat_seconds = float(heartbeat_seconds)
         self.stale_after_seconds = float(stale_after_seconds)
         self.reconnect_after_seconds = float(reconnect_after_seconds)
@@ -397,6 +405,10 @@ class SmartApiFeed:
             log.info("feed_text_frame", frame=scrub(json.dumps(payload, default=str))[:200])
 
     async def _handle_packet(self, packet: FeedPacket) -> None:
+        index_symbol = self._index_tokens.get(packet.token)
+        if index_symbol is not None:
+            await self._handle_index_packet(packet, index_symbol)
+            return
         instrument_id = self.resolve(packet.exchange_type_name, packet.token)
         if instrument_id is None:
             return  # not in this universe: the frame is ignored, never guessed at
@@ -434,6 +446,31 @@ class SmartApiFeed:
         if self.status is not FeedStatus.STREAMING:
             await self.set_status(FeedStatus.STREAMING, "ticks arriving")
         await self.on_tick(tick)
+
+    async def _handle_index_packet(self, packet: FeedPacket, index_symbol: str) -> None:
+        price = scale_price(packet.last_traded_price_paise, self.settings.price_scale)
+        if price is None or price <= 0:
+            self.stats.decode_errors += 1
+            return
+        try:
+            exchange_ts = packet.exchange_timestamp
+        except FeedDecodeError as exc:
+            self.stats.decode_errors += 1
+            self.stats.last_error = scrub(str(exc))[:300]
+            return
+        tick = IndexTick(
+            index_symbol=index_symbol,
+            instrument_token=packet.token,
+            exchange_timestamp=exchange_ts,
+            received_at=now_ist(),
+            last_price=float(price),
+            previous_close=scale_price(packet.closed_price_paise, self.settings.price_scale),
+        )
+        self.stats.ticks_emitted += 1
+        # Deliberately no STREAMING transition here: index ticks alone must not
+        # present the stock feed as healthy to the signal-suspension logic.
+        if self.on_index_tick is not None:
+            await self.on_index_tick(tick)
 
     async def _heartbeat(self, socket: object) -> None:
         while not self._stop.is_set():

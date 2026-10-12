@@ -174,6 +174,13 @@ export const replaySource: ScannerSource = {
     const wanted = new Set(signalIds.map((id) => Math.trunc(id)));
     return (fixture?.deliveries ?? []).map(mapDelivery).filter((row) => wanted.has(row.signal_id));
   },
+
+  // The fixture exporter predates the sector tile and carries no index rows;
+  // an honestly empty tile beats a fabricated one (§19 — coverage is counted,
+  // never implied).
+  async sectorQuotes() {
+    return [];
+  },
 };
 
 /** The single session row the sample describes, for pages that show "this session". */

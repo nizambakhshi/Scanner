@@ -144,6 +144,8 @@ class ScannerParams:
 
     def validate(self) -> None:
         errors: list[str] = []
+        if self.universe not in ("NIFTY500", "FNO"):
+            errors.append("UNIVERSE must be NIFTY500 or FNO")
         if self.fast_ema_period < 2:
             errors.append("FAST_EMA_PERIOD must be >= 2")
         if self.slow_ema_period <= self.fast_ema_period:
@@ -317,6 +319,11 @@ class WorkerSettings:
     worker_id: str = "worker-local"
     heartbeat_seconds: int = 20
     session_lease_seconds: int = 300
+    # Intraday candles lose their value once the session they describe is
+    # finalized — retention bounds the hot tables, the warmup window feeds
+    # them. Warmup days (AngelSettings) may not exceed this: fetching history
+    # that the next purge immediately deletes is just broker API spend.
+    retention_days: int = 7
     scanner: ScannerParams = field(default_factory=ScannerParams)
     angel: AngelSettings = field(default_factory=AngelSettings)
     telegram: TelegramSettings = field(default_factory=TelegramSettings)
@@ -423,6 +430,7 @@ def load_settings(
         worker_id=_get(raw, "WORKER_ID") or "worker-local",
         heartbeat_seconds=_int(raw, "WORKER_HEARTBEAT_SECONDS", 20),
         session_lease_seconds=_int(raw, "SESSION_LEASE_SECONDS", 300),
+        retention_days=_int(raw, "RETENTION_DAYS", 7),
         scanner=scanner,
         angel=angel,
         telegram=telegram,
@@ -444,6 +452,13 @@ def load_settings(
         raise ConfigError("WORKER_HEARTBEAT_SECONDS must be >= 5")
     if settings.session_lease_seconds <= settings.heartbeat_seconds:
         raise ConfigError("SESSION_LEASE_SECONDS must exceed WORKER_HEARTBEAT_SECONDS")
+    if not 1 <= settings.retention_days <= 30:
+        raise ConfigError("RETENTION_DAYS must be between 1 and 30")
+    if scan_mode == "live" and angel.historical_warmup_days > settings.retention_days:
+        raise ConfigError(
+            "HISTORICAL_WARMUP_DAYS must not exceed RETENTION_DAYS; "
+            "the purge would delete the history just fetched"
+        )
     if scan_mode == "live" and scanner.max_subscribed_instruments > angel.max_tokens_per_session:
         raise ConfigError(
             "MAX_SUBSCRIBED_INSTRUMENTS exceeds ANGEL_MAX_TOKENS_PER_SESSION"
