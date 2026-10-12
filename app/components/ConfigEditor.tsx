@@ -116,14 +116,14 @@ export function ConfigEditor({ row }: { row: ConfigRowLite }) {
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {FIELDS.map((field) => (
           <label key={field.key} className="flex flex-col gap-1">
-            <span className="text-[11px] uppercase tracking-wide text-muted">{field.label}</span>
+            <span className="eyebrow">{field.label}</span>
             <input
               type="number"
               step={field.step}
               min={field.min}
               value={values[field.key] ?? ""}
               onChange={(event) => setValues((prev) => ({ ...prev, [field.key]: event.target.value }))}
-              className="num w-full rounded border border-line bg-surface px-2 py-1.5 text-[13px]"
+              className="num w-full rounded border border-line-2 bg-surface px-2 py-1.5 text-[13px] focus:border-accent focus:outline-none"
             />
             <span className="text-[10px] leading-snug text-muted">{field.hint}</span>
           </label>
@@ -142,7 +142,7 @@ export function ConfigEditor({ row }: { row: ConfigRowLite }) {
           type="button"
           onClick={() => setOpen(false)}
           disabled={busy}
-          className="rounded border border-line px-3 py-1.5 text-[13px] text-ink-2 hover:bg-surface-2"
+          className="rounded border border-line px-3 py-1.5 text-[13px] text-ink-2 hover:bg-hover"
         >
           Cancel
         </button>

@@ -34,7 +34,7 @@ export function SignOutButton({ everywhere = false }: { everywhere?: boolean }) 
       <button
         type="submit"
         disabled={busy}
-        className="rounded-md border border-line px-2.5 py-1 text-[12px] font-medium text-ink-2 transition hover:border-line-2 hover:bg-surface-2 disabled:opacity-60"
+        className="rounded-md border border-line px-2.5 py-1 text-[12px] font-medium text-ink-2 transition hover:border-line-2 hover:bg-hover disabled:opacity-60"
       >
         {busy ? "Signing out…" : everywhere ? "Sign out everywhere" : "Sign out"}
       </button>

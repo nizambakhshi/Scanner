@@ -110,8 +110,8 @@ export function CandleChart({
       <svg viewBox={`0 0 ${WIDTH} ${PRICE_HEIGHT + VOLUME_HEIGHT}`} className="w-full" role="img" aria-label={`${symbol} 1-minute candles with VWAP, EMA9 and EMA20`}>
         {gridValues.map((value) => (
           <g key={value}>
-            <line x1={PAD.left} x2={WIDTH - PAD.right} y1={y(value)} y2={y(value)} stroke="#e6e8eb" strokeWidth={1} />
-            <text x={WIDTH - PAD.right + 6} y={y(value) + 4} className="num" fontSize={11} fill="#6a7078">
+            <line x1={PAD.left} x2={WIDTH - PAD.right} y1={y(value)} y2={y(value)} stroke="var(--color-line)" strokeWidth={1} />
+            <text x={WIDTH - PAD.right + 6} y={y(value) + 4} className="num" fontSize={11} fill="var(--color-muted)">
               {value.toFixed(2)}
             </text>
           </g>
@@ -119,16 +119,16 @@ export function CandleChart({
 
         {shown.map((candle, index) => {
           const up = candle.close >= candle.open;
-          const colour = up ? "#0f8a5f" : "#d33131";
+          const colour = up ? "var(--color-positive)" : "var(--color-negative)";
           const top = y(Math.max(candle.open, candle.close));
           const height = Math.max(1, Math.abs(y(candle.open) - y(candle.close)));
           const incomplete = !candle.is_complete;
           return (
             <g key={candle.candle_start_at} opacity={incomplete ? 0.45 : 1}>
               <line x1={x(index)} x2={x(index)} y1={y(candle.high)} y2={y(candle.low)} stroke={colour} strokeWidth={1} />
-              <rect x={x(index) - bodyWidth / 2} y={top} width={bodyWidth} height={height} fill={up ? "#ffffff" : colour} stroke={colour} strokeWidth={1} />
+              <rect x={x(index) - bodyWidth / 2} y={top} width={bodyWidth} height={height} fill={up ? "var(--color-surface)" : colour} stroke={colour} strokeWidth={1} />
               {candle.data_quality_status !== "OK" ? (
-                <circle cx={x(index)} cy={PAD.top - 4} r={2.4} fill="#b4690e">
+                <circle cx={x(index)} cy={PAD.top - 4} r={2.4} fill="var(--color-amber)">
                   <title>{`${clock(candle.candle_start_at)} · ${candle.data_quality_status}`}</title>
                 </circle>
               ) : null}
@@ -138,13 +138,13 @@ export function CandleChart({
         })}
 
         {vwapSegments.map((points, index) => (
-          <polyline key={`vwap-${index}`} points={points} fill="none" stroke="#1d52f2" strokeWidth={1.6} />
+          <polyline key={`vwap-${index}`} points={points} fill="none" stroke="var(--color-accent)" strokeWidth={1.6} />
         ))}
         {ema9Segments.map((points, index) => (
-          <polyline key={`ema9-${index}`} points={points} fill="none" stroke="#7c3aed" strokeWidth={1.4} strokeDasharray="4 2" />
+          <polyline key={`ema9-${index}`} points={points} fill="none" stroke="var(--color-ema9)" strokeWidth={1.4} strokeDasharray="4 2" />
         ))}
         {ema20Segments.map((points, index) => (
-          <polyline key={`ema20-${index}`} points={points} fill="none" stroke="#b4690e" strokeWidth={1.4} strokeDasharray="1 3" />
+          <polyline key={`ema20-${index}`} points={points} fill="none" stroke="var(--color-amber)" strokeWidth={1.4} strokeDasharray="1 3" />
         ))}
 
         {shown.map((candle, index) => {
@@ -156,24 +156,24 @@ export function CandleChart({
               y={vy(candle.volume)}
               width={bodyWidth}
               height={Math.max(1, volumeBaseline - vy(candle.volume))}
-              fill={up ? "#0f8a5f" : "#d33131"}
+              fill={up ? "var(--color-positive)" : "var(--color-negative)"}
               opacity={0.28}
             />
           );
         })}
-        <line x1={PAD.left} x2={WIDTH - PAD.right} y1={volumeBaseline} y2={volumeBaseline} stroke="#d2d6db" strokeWidth={1} />
+        <line x1={PAD.left} x2={WIDTH - PAD.right} y1={volumeBaseline} y2={volumeBaseline} stroke="var(--color-line-2)" strokeWidth={1} />
 
         {[0, Math.floor(shown.length / 2), shown.length - 1].map((index) => (
-          <text key={`t-${index}`} x={x(index)} y={PRICE_HEIGHT + VOLUME_HEIGHT - 4} fontSize={11} fill="#6a7078" className="num" textAnchor="middle">
+          <text key={`t-${index}`} x={x(index)} y={PRICE_HEIGHT + VOLUME_HEIGHT - 4} fontSize={11} fill="var(--color-muted)" className="num" textAnchor="middle">
             {clock(shown[index].candle_start_at)}
           </text>
         ))}
       </svg>
 
       <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted">
-        <Legend swatch="#1d52f2" label="session VWAP" />
-        <Legend swatch="#7c3aed" label="EMA9" dashed />
-        <Legend swatch="#b4690e" label="EMA20" dotted />
+        <Legend swatch="var(--color-accent)" label="session VWAP" />
+        <Legend swatch="var(--color-ema9)" label="EMA9" dashed />
+        <Legend swatch="var(--color-amber)" label="EMA20" dotted />
         <span className="num">
           {clock(first.candle_start_at)}–{clock(last.candle_start_at)} · {shown.length} candles
         </span>

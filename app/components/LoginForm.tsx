@@ -83,7 +83,7 @@ export function LoginForm({ setupProblem }: { setupProblem: string | null }) {
       <button
         type="submit"
         disabled={status.kind === "busy" || setupProblem !== null}
-        className="w-full rounded-md bg-ink px-3 py-2 text-[14px] font-semibold text-white transition hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
+        className="w-full rounded-md bg-ink px-3 py-2 text-[14px] font-semibold text-surface transition hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {status.kind === "busy" ? "Checking…" : "Sign in"}
       </button>

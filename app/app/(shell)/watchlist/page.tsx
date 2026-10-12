@@ -19,15 +19,23 @@ export const dynamic = "force-dynamic";
 export default async function WatchlistPage({ searchParams }: { searchParams: Promise<{ date?: string }> }) {
   const { date } = await searchParams;
   const wanted = dateParam(date);
-  const [rows, days] = await Promise.all([
+  const [rows, days, sparks] = await Promise.all([
     panel(() => source().currentWatchlist(wanted)),
     panel(() => source().history(30)),
+    panel(() => source().intradaySparklines()),
   ]);
 
   const list = ok(rows) ? rows.data : [];
   const tracked = list.filter((row) => row.current_state === "ACTIVE" || row.current_state === "REQUALIFIED");
   const dropped = list.filter((row) => row.current_state === "REMOVED");
   const weakened = list.filter((row) => row.current_state === "WEAKENING" || row.current_state === "DATA_STALE");
+
+  // The sparkline series is always the newest session's. When the table has been
+  // filtered to a past day, today's trend beside that membership would be a
+  // different session's measurement — so the column drops instead.
+  const latest = ok(days) ? (days.data[0]?.trading_date ?? null) : null;
+  const showingLatest = wanted === null || wanted === latest;
+  const sparklines = showingLatest && ok(sparks) ? sparks.data : undefined;
 
   return (
     <div className="space-y-4">
@@ -50,7 +58,7 @@ export default async function WatchlistPage({ searchParams }: { searchParams: Pr
       </div>
 
       <Panel title={wanted ? `Memberships on ${longDate(wanted)}` : "Latest session"} hint="tracked first, then by score">
-        {ok(rows) ? <WatchlistTable rows={list} /> : <ErrorNote title="Watchlist unavailable" detail={rows.error} />}
+        {ok(rows) ? <WatchlistTable rows={list} sparklines={sparklines} /> : <ErrorNote title="Watchlist unavailable" detail={rows.error} />}
       </Panel>
 
       {ok(rows) && list.length > 0 ? (
@@ -96,7 +104,7 @@ function DateFilter({ value, days }: { value: string; days: string[] }) {
           <option key={day} value={day} />
         ))}
       </datalist>
-      <button type="submit" className="rounded-md border border-line px-2.5 py-1 text-[12px] font-medium hover:bg-surface-2">
+      <button type="submit" className="rounded-md border border-line px-2.5 py-1 text-[12px] font-medium hover:bg-hover">
         Show
       </button>
       {value ? (

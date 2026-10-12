@@ -187,6 +187,27 @@ export const replaySource: ScannerSource = {
     return [];
   },
 
+  // The scripted session's 1-minute bars ARE real candles from the replay
+  // pipeline, so a 5-minute-bucket trend of them is a measurement, not an
+  // invention — sampled with the same bucket size the SQL source uses.
+  async intradaySparklines() {
+    const fixture = load();
+    if (!fixture) return {};
+    const out: Record<number, number[]> = {};
+    for (const raw of fixture.instruments ?? []) {
+      const instrument = mapInstrument(raw);
+      const closes = sampleFiveMinuteCloses(fixture.candles?.[instrument.symbol] ?? []);
+      if (closes.length >= 2) out[instrument.id] = closes;
+    }
+    return out;
+  },
+
+  // The fixture predates candles_1d; an honest empty map renders dashes instead
+  // of a fabricated daily line (same rule as the /stocks page).
+  async dailySparklines() {
+    return {};
+  },
+
   async deliveries(signalIds: number[]) {
     const fixture = load();
     const wanted = new Set(signalIds.map((id) => Math.trunc(id)));
@@ -205,6 +226,22 @@ export const replaySource: ScannerSource = {
 export async function replaySession(): Promise<Raw | null> {
   const fixture = load();
   return fixture?.session ?? null;
+}
+
+/** The fixture's scripted session, cut into 5-minute buckets by wall clock; the
+ *  last 1-minute close in each bucket, oldest bucket first — the same shape the
+ *  SQL source produces from candles_1m, so the glyph renders identically. */
+function sampleFiveMinuteCloses(rawCandles: Raw[]): number[] {
+  const closes = new Map<number, { at: number; close: number }>();
+  for (const raw of rawCandles) {
+    const candle = mapCandle(raw);
+    const at = Date.parse(candle.candle_start_at);
+    if (!Number.isFinite(at) || !Number.isFinite(candle.close)) continue;
+    const bucket = Math.floor(at / 300_000);
+    const held = closes.get(bucket);
+    if (!held || at > held.at) closes.set(bucket, { at, close: candle.close });
+  }
+  return [...closes.entries()].sort(([a], [b]) => a - b).map(([, held]) => held.close);
 }
 
 export async function replayInstruments(): Promise<ReturnType<typeof mapInstrument>[]> {

@@ -38,8 +38,12 @@ export default async function StocksPage({
   const bias = parseStockBiasFilter(params.bias);
 
   const stocks = await panel(() => source().stocksOverview());
+  const sparks = await panel(() => source().dailySparklines());
   const rows = ok(stocks) ? stocks.data : [];
   const visible = filterStocksByBias(rows, bias);
+  // A failed series read drops the Trend column entirely — a column of dashes
+  // would suggest the data was read and found empty.
+  const sparklines = ok(sparks) ? sparks.data : undefined;
 
   const classified = rows.filter((row) => row.rsi_bias !== null).length;
   const bullish = rows.filter((row) => row.rsi_bias === "BULLISH").length;
@@ -85,7 +89,7 @@ export default async function StocksPage({
           rows.length > 0 && visible.length === 0 && bias !== "ALL" ? (
             <Empty>{FILTER_EMPTY[bias]} — the counts above are of the full universe.</Empty>
           ) : (
-            <StocksTable rows={visible} />
+            <StocksTable rows={visible} sparklines={sparklines} />
           )
         ) : (
           <ErrorNote title="Stocks directory unavailable" detail={stocks.error} />

@@ -483,6 +483,13 @@ export interface ScannerSource {
   /** The /strategy ORB board: the newest session's opening range, first
    *  breakout and confirmation readings for every instrument. */
   orbStrategy(): Promise<OrbRow[]>;
+  /** Table sparklines, `instrument_id → closes` oldest → newest. Intraday: the
+   *  newest session's closes sampled per 5-minute bucket from `candles_1m`.
+   *  A missing key means "no series" — the table renders a dash, never a
+   *  fabricated line. */
+  intradaySparklines(): Promise<Record<number, number[]>>;
+  /** Table sparklines over the newest ~15 completed daily closes (`candles_1d`). */
+  dailySparklines(): Promise<Record<number, number[]>>;
   deliveries(signalIds: number[]): Promise<DeliveryRow[]>;
   sectorQuotes(): Promise<SectorQuoteRow[]>;
 }

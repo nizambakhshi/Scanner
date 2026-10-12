@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { SimChip } from "./SimulatedBanner";
+import { Sparkline } from "./Sparkline";
 import { RsiBiasBadge, StateBadge } from "./badges";
 import { Empty } from "./ui";
 import { clock, dateTime, multiple, orDash, pct, price, rsi, score } from "@/lib/format";
@@ -14,7 +15,18 @@ import type { RsiBias, WatchlistRow } from "@/lib/types";
  * warming-up symbol genuinely has no EMA20, so it renders as a dash, never as 0,
  * because 0 would read as "failed the test" instead of "not tested".
  */
-export function WatchlistTable({ rows, showSymbolLink = true }: { rows: WatchlistRow[]; showSymbolLink?: boolean }) {
+export function WatchlistTable({
+  rows,
+  showSymbolLink = true,
+  sparklines,
+}: {
+  rows: WatchlistRow[];
+  showSymbolLink?: boolean;
+  /** Today's 5-minute closes per instrument, oldest → newest. The Trend column
+   *  renders only when the caller could read the series — a column of dashes
+   *  would be noise, and a fabricated line would be worse. */
+  sparklines?: Record<number, number[]>;
+}) {
   if (rows.length === 0) {
     return <Empty>Nothing qualifies yet. That is a real answer, not a loading state.</Empty>;
   }
@@ -24,6 +36,11 @@ export function WatchlistTable({ rows, showSymbolLink = true }: { rows: Watchlis
         <thead>
           <tr className="border-b border-line">
             <th className="th">Symbol</th>
+            {sparklines ? (
+              <th className="th" title="Close of each traded 5-minute bucket today, oldest → newest">
+                Trend
+              </th>
+            ) : null}
             <th className="th">State</th>
             <th className="th text-right">Score</th>
             <th className="th text-right">Rank</th>
@@ -64,6 +81,14 @@ export function WatchlistTable({ rows, showSymbolLink = true }: { rows: Watchlis
                     ) : null}
                   </div>
                 </td>
+                {sparklines ? (
+                  <td className="td">
+                    <Sparkline
+                      values={sparklines[row.instrument_id]}
+                      missing={`No 5-minute closes today for ${row.symbol ?? row.trading_symbol ?? "this symbol"}`}
+                    />
+                  </td>
+                ) : null}
                 <td className="td">
                   <StateBadge state={row.current_state} />
                   <div className="num mt-1 text-[11px] text-muted">

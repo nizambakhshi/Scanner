@@ -18,7 +18,7 @@ export function Panel({
     <section className={`card ${className}`}>
       <div className="panel-title">
         <div className="flex items-baseline gap-2">
-          <h2 className="text-[13px] font-bold tracking-tight">{title}</h2>
+          <h2 className="font-display text-[12px] font-semibold uppercase tracking-[0.1em] text-ink">{title}</h2>
           {hint ? <span className="text-[11px] text-muted">{hint}</span> : null}
         </div>
         {action}
@@ -78,7 +78,7 @@ export function PageHeading({
   return (
     <div className="flex flex-wrap items-end justify-between gap-3 pb-1">
       <div>
-        <h1 className="text-[19px] font-semibold tracking-tight">{title}</h1>
+        <h1 className="font-display text-[21px] font-semibold uppercase tracking-[0.05em]">{title}</h1>
         {subtitle ? <p className="mt-1 max-w-[70ch] text-[13px] leading-snug text-muted">{subtitle}</p> : null}
       </div>
       {aside ? <div className="flex flex-wrap items-center gap-2">{aside}</div> : null}

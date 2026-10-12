@@ -99,24 +99,24 @@ export function RetentionPanel() {
     <div className="px-4 py-3">
       <div className="flex flex-wrap items-end gap-3">
         <label className="flex flex-col gap-1">
-          <span className="text-[11px] uppercase tracking-wide text-muted">Ageing (days)</span>
+          <span className="eyebrow">Ageing (days)</span>
           <input
             type="number"
             min={1}
             max={30}
             value={days}
             onChange={(event) => setDays(event.target.value)}
-            className="num w-24 rounded border border-line bg-surface px-2 py-1.5 text-[13px]"
+            className="num w-24 rounded border border-line-2 bg-surface px-2 py-1.5 text-[13px] focus:border-accent focus:outline-none"
           />
         </label>
         <label className="flex flex-col gap-1">
-          <span className="text-[11px] uppercase tracking-wide text-muted">Stock (optional)</span>
+          <span className="eyebrow">Stock (optional)</span>
           <input
             type="text"
             placeholder="ALL — every stock"
             value={symbol}
             onChange={(event) => setSymbol(event.target.value)}
-            className="num w-44 rounded border border-line bg-surface px-2 py-1.5 text-[13px] uppercase"
+            className="num w-44 rounded border border-line-2 bg-surface px-2 py-1.5 text-[13px] uppercase focus:border-accent focus:outline-none"
           />
         </label>
         <button

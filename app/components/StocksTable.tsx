@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Sparkline } from "./Sparkline";
 import { RsiBiasBadge, rsiBandTone } from "./badges";
 import { Empty } from "./ui";
 import { crores, orDash, pct, price, rsi } from "@/lib/format";
@@ -13,7 +14,15 @@ import type { StockOverviewRow } from "@/lib/types";
  * LEFT JOINs in the source keep an unsynced stock in the list, because a stock
  * missing from a directory of 212 is indistinguishable from one that was deleted.
  */
-export function StocksTable({ rows }: { rows: StockOverviewRow[] }) {
+export function StocksTable({
+  rows,
+  sparklines,
+}: {
+  rows: StockOverviewRow[];
+  /** The newest daily closes per instrument, oldest → newest. The Trend column
+   *  renders only when the caller could read the series. */
+  sparklines?: Record<number, number[]>;
+}) {
   if (rows.length === 0) {
     return <Empty>The universe is empty — no instruments are flagged for the configured scan set.</Empty>;
   }
@@ -25,6 +34,11 @@ export function StocksTable({ rows }: { rows: StockOverviewRow[] }) {
             <th className="th">Symbol</th>
             <th className="th text-right">Price</th>
             <th className="th text-right">Chg %</th>
+            {sparklines ? (
+              <th className="th" title="Last 15 completed daily closes, oldest → newest">
+                Trend
+              </th>
+            ) : null}
             <th className="th text-right">P/E</th>
             <th className="th text-right">52W high</th>
             <th className="th text-right">52W low</th>
@@ -57,6 +71,15 @@ export function StocksTable({ rows }: { rows: StockOverviewRow[] }) {
                   <div className="num text-[11px] text-muted">{row.last_bar_date ? orDash(row.last_bar_date) : ""}</div>
                 </td>
                 <td className={`td num text-right ${changeTone(change)}`}>{pct(change)}</td>
+                {sparklines ? (
+                  <td className="td">
+                    <Sparkline
+                      values={sparklines[row.instrument_id]}
+                      width={120}
+                      missing={`No daily closes synced for ${row.symbol}`}
+                    />
+                  </td>
+                ) : null}
                 <td className="td num text-right">{row.pe_ratio === null ? "—" : row.pe_ratio.toFixed(1)}</td>
                 <td className="td num text-right">{price(row.high_52w)}</td>
                 <td className="td num text-right">{price(row.low_52w)}</td>

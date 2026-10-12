@@ -29,7 +29,7 @@ export default async function LoginPage() {
         <div className="w-full max-w-[380px]">
           <div className="mb-5">
             <p className="eyebrow">NSE · 1m · intraday</p>
-            <h1 className="mt-1 text-[22px] font-semibold tracking-tight">Bullish Scanner</h1>
+            <h1 className="font-display mt-1 text-[24px] font-semibold uppercase tracking-[0.05em]">Bullish Scanner</h1>
             <p className="mt-1.5 text-[13px] leading-snug text-muted">
               The operator view of the daily watchlist, the alert feed and the delivery queue. Read-only: this
               dashboard cannot place, modify or cancel an order.

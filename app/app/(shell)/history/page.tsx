@@ -47,7 +47,7 @@ export default async function HistoryPage({ searchParams }: { searchParams: Prom
                 </option>
               ))}
             </select>
-            <button type="submit" className="rounded-md border border-line px-2.5 py-1 font-medium hover:bg-surface-2">
+            <button type="submit" className="rounded-md border border-line px-2.5 py-1 font-medium hover:bg-hover">
               Apply
             </button>
           </form>

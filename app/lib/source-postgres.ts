@@ -367,6 +367,44 @@ const CANDLES_SQL = `
   ORDER BY candle_start_at DESC
   LIMIT $2::int`;
 
+/** Sparkline series for the watchlist and the Board: the newest session's
+ *  closes, one per 5-minute bucket (the last 1-minute close in each). 09:15 IST
+ *  is an exact 300-second epoch boundary, so bucketing by the epoch floor is the
+ *  same partition the ORB page uses. A bucket that traded nothing produces no
+ *  point — the glyph is as dense as the data, never padded. */
+const INTRADAY_SPARK_SQL = `
+  WITH w AS (
+    SELECT max(trading_date) AS trading_date FROM candles_1m
+  ),
+  bucket AS (
+    SELECT c.instrument_id,
+           floor(extract(epoch FROM c.candle_start_at) / 300.0)::bigint AS bucket,
+           max(c.candle_start_at) AS last_at,
+           (array_agg(c.close ORDER BY c.candle_start_at DESC))[1] AS close
+    FROM candles_1m c CROSS JOIN w
+    WHERE c.trading_date = w.trading_date
+    GROUP BY c.instrument_id, floor(extract(epoch FROM c.candle_start_at) / 300.0)::bigint
+  )
+  SELECT instrument_id::int AS instrument_id,
+         array_agg(close::float8 ORDER BY bucket) AS closes
+  FROM bucket
+  GROUP BY instrument_id`;
+
+/** Sparkline series for the /stocks directory: the newest daily closes, oldest
+ *  first. 15 points is the horizontal budget of the column; symbols with fewer
+ *  bars get fewer points, and symbols with none get no key at all. */
+const DAILY_SPARK_SQL = `
+  WITH ranked AS (
+    SELECT instrument_id, trading_date, close,
+           row_number() OVER (PARTITION BY instrument_id ORDER BY trading_date DESC) AS rn
+    FROM candles_1d
+  )
+  SELECT instrument_id::int AS instrument_id,
+         array_agg(close::float8 ORDER BY trading_date) AS closes
+  FROM ranked
+  WHERE rn <= $1::int
+  GROUP BY instrument_id`;
+
 const SNAPSHOTS_SQL = `
   SELECT id::int AS id, instrument_id::int AS instrument_id, trading_date::text AS trading_date,
          candle_start_at, close::float8 AS close, previous_close::float8 AS previous_close,
@@ -424,6 +462,19 @@ const SECTOR_SQL = `
 
 function limit(value: number | undefined, max: number): number {
   return Math.min(Math.max(Math.trunc(value ?? max), 1), max);
+}
+
+/** `[{instrument_id, closes}]` → `{instrument_id: closes}`; nulls inside the
+ *  array cannot occur in SQL output, but a defensive Number() keeps a string
+ *  numeric from ever reaching the SVG path builder. */
+function toSeries(rows: Raw[]): Record<number, number[]> {
+  const out: Record<number, number[]> = {};
+  for (const row of rows) {
+    const id = Number(row.instrument_id);
+    const closes = Array.isArray(row.closes) ? (row.closes as unknown[]).map(Number) : [];
+    if (Number.isFinite(id) && closes.length > 0) out[id] = closes;
+  }
+  return out;
 }
 
 export const postgresSource: ScannerSource = {
@@ -505,6 +556,16 @@ export const postgresSource: ScannerSource = {
 
   async orbStrategy() {
     return (await query<Raw>(ORB_STRATEGY_SQL)).map(mapOrbRow);
+  },
+
+  async intradaySparklines() {
+    const rows = await query<Raw>(INTRADAY_SPARK_SQL);
+    return toSeries(rows);
+  },
+
+  async dailySparklines() {
+    const rows = await query<Raw>(DAILY_SPARK_SQL, [15]);
+    return toSeries(rows);
   },
 
   async deliveries(signalIds: number[]) {
