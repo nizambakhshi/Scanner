@@ -397,7 +397,13 @@ class PostgresStore(ScannerStore):
             open=False,
             min_size=min_size,
             max_size=max_size,
-            max_idle=timedelta(seconds=30),
+            # psycopg_pool 3.3.3 computes `monotonic() + max_idle` in its
+            # ShrinkPool maintenance task — a timedelta here raises
+            # "TypeError: unsupported operand type(s) for +: 'float' and
+            # 'datetime.timedelta'" on every scheduler tick (silently: the
+            # pool works, it just never shrinks). The constructor wants
+            # seconds as a float.
+            max_idle=30.0,
             check=AsyncConnectionPool.check_connection,
             kwargs={
                 "row_factory": dict_row,
