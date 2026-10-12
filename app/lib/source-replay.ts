@@ -179,6 +179,14 @@ export const replaySource: ScannerSource = {
     return [];
   },
 
+  // Same rule for the ORB board: the replay sample's session is a scripted
+  // fixture, not a real NSE opening range, and re-labelling it as one would be
+  // exactly the kind of invention this project refuses. The empty state is
+  // honest; the live page runs against candles_1m.
+  async orbStrategy() {
+    return [];
+  },
+
   async deliveries(signalIds: number[]) {
     const fixture = load();
     const wanted = new Set(signalIds.map((id) => Math.trunc(id)));

@@ -24,6 +24,7 @@ import {
   mapEvent,
   mapHistory,
   mapInstrument,
+  mapOrbRow,
   mapSectorQuote,
   mapSignal,
   mapSnapshot,
@@ -236,6 +237,126 @@ const WEEKLY_RSI_SQL = `
   ORDER BY week_start DESC
   LIMIT $2::int`;
 
+/**
+ * The /strategy ORB board: for every instrument in the configured universe, the
+ * newest session's opening range and first 5-minute breakout, computed from the
+ * stored 1-minute candles only.
+ *
+ * Session window: the newest `trading_date` in candles_1m, 9:15–15:30 IST. The
+ * series is cut into 5-minute buckets by wall-clock offset from the open
+ * (`bucket` 0 IS the opening range), so a bucket close is the last 1-minute
+ * close in it — exactly the "5-minute close" the strategy trades on. The first
+ * bucket after the range whose close is beyond the range high/low is the
+ * breakout; `*_ratio` is that bucket's volume over the mean of every 5-minute
+ * bucket before it (the range candle included — the volume evidence available
+ * at breakout time). `session_vwap` is Σ(TP·V)/ΣV over the same bars, the
+ * worker's own VWAP formula, so the two pages can never disagree. EMA 9/20 is
+ * the only field not derivable from one session: it is the worker's streaming
+ * EMA carried across sessions, read from the newest snapshot of the session
+ * (null until the worker has scanned the symbol). No broker token leaves the
+ * database (§19).
+ */
+const ORB_STRATEGY_SQL = `
+  WITH cfg AS (
+    SELECT COALESCE(
+      (SELECT universe FROM scanner_configs
+       ORDER BY is_enabled DESC, config_version DESC LIMIT 1), 'FNO') AS universe
+  ),
+  w AS (
+    SELECT d.trading_date,
+           (d.trading_date::timestamp + time '09:15') AT TIME ZONE 'Asia/Kolkata' AS open_at,
+           (d.trading_date::timestamp + time '15:30') AT TIME ZONE 'Asia/Kolkata' AS close_at
+    FROM (SELECT max(trading_date) AS trading_date FROM candles_1m) d
+  ),
+  u AS (
+    SELECT i.id AS instrument_id, i.symbol, i.trading_symbol, i.company_name
+    FROM instruments i CROSS JOIN cfg
+    WHERE i.is_active AND i.mapping_status = 'MAPPED'
+      AND (cfg.universe <> 'FNO' OR i.is_fno)
+      AND (cfg.universe <> 'NIFTY500' OR i.is_nifty500)
+  ),
+  bars AS (
+    SELECT c.instrument_id, c.candle_start_at,
+           floor(extract(epoch FROM (c.candle_start_at - w.open_at)) / 300.0)::int AS bucket,
+           c.high, c.low, c.close, c.volume
+    FROM candles_1m c CROSS JOIN w
+    WHERE c.trading_date = w.trading_date
+      AND c.candle_start_at >= w.open_at
+      AND c.candle_start_at < w.close_at
+  ),
+  bucket AS (
+    SELECT instrument_id, bucket,
+           max(candle_start_at) AS last_at,
+           max(high) AS high, min(low) AS low,
+           (array_agg(close ORDER BY candle_start_at DESC))[1] AS close,
+           sum(volume) AS volume,
+           sum(volume * (high + low + close) / 3.0) AS price_volume,
+           count(*) AS bar_count
+    FROM bars
+    GROUP BY instrument_id, bucket
+  ),
+  agg AS (
+    SELECT b.*,
+           sum(volume) OVER before_now AS volume_before,
+           count(*)    OVER before_now AS buckets_before,
+           sum(volume) OVER through_now AS volume_through,
+           sum(price_volume) OVER through_now AS price_volume_through
+    FROM bucket b
+    WINDOW before_now AS (PARTITION BY instrument_id ORDER BY bucket
+                          ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+           through_now AS (PARTITION BY instrument_id ORDER BY bucket
+                           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+  ),
+  orng AS (
+    SELECT instrument_id, high AS or_high, low AS or_low, bar_count AS or_bars
+    FROM agg WHERE bucket = 0
+  ),
+  bu AS (
+    SELECT DISTINCT ON (a.instrument_id)
+           a.instrument_id, a.last_at, a.close, a.volume,
+           a.volume::numeric / nullif(a.volume_before::numeric / nullif(a.buckets_before, 0), 0) AS ratio
+    FROM agg a JOIN orng o USING (instrument_id)
+    WHERE a.bucket >= 1 AND a.close > o.or_high
+    ORDER BY a.instrument_id, a.bucket
+  ),
+  bd AS (
+    SELECT DISTINCT ON (a.instrument_id)
+           a.instrument_id, a.last_at, a.close, a.volume,
+           a.volume::numeric / nullif(a.volume_before::numeric / nullif(a.buckets_before, 0), 0) AS ratio
+    FROM agg a JOIN orng o USING (instrument_id)
+    WHERE a.bucket >= 1 AND a.close < o.or_low
+    ORDER BY a.instrument_id, a.bucket
+  ),
+  latest AS (
+    SELECT DISTINCT ON (instrument_id)
+           instrument_id, last_at, close, volume_through, price_volume_through
+    FROM agg ORDER BY instrument_id, bucket DESC
+  ),
+  snap AS (
+    SELECT DISTINCT ON (s.instrument_id)
+           s.instrument_id, s.candle_start_at AS snap_at, s.ema9, s.ema20
+    FROM indicator_snapshots s CROSS JOIN w
+    WHERE s.trading_date = w.trading_date
+    ORDER BY s.instrument_id, s.candle_start_at DESC
+  )
+  SELECT u.instrument_id::int AS instrument_id, u.symbol, u.trading_symbol, u.company_name,
+         (SELECT w.trading_date::text FROM w) AS session_date,
+         o.or_high::float8 AS or_high, o.or_low::float8 AS or_low, o.or_bars::int AS or_bars,
+         bu.last_at AS bu_at, bu.close::float8 AS bu_close, bu.volume::int8 AS bu_volume,
+         bu.ratio::float8 AS bu_ratio,
+         bd.last_at AS bd_at, bd.close::float8 AS bd_close, bd.volume::int8 AS bd_volume,
+         bd.ratio::float8 AS bd_ratio,
+         lt.last_at AS latest_at, lt.close::float8 AS latest_close,
+         (lt.price_volume_through / nullif(lt.volume_through, 0))::float8 AS session_vwap,
+         sn.snap_at, sn.ema9::float8 AS ema9, sn.ema20::float8 AS ema20
+  FROM u
+  LEFT JOIN orng o USING (instrument_id)
+  LEFT JOIN bu USING (instrument_id)
+  LEFT JOIN bd USING (instrument_id)
+  LEFT JOIN latest lt USING (instrument_id)
+  LEFT JOIN snap sn USING (instrument_id)
+  ORDER BY u.symbol`;
+
 const CANDLES_SQL = `
   SELECT instrument_id::int AS instrument_id, trading_date::text AS trading_date,
          candle_start_at, open::float8 AS open, high::float8 AS high, low::float8 AS low,
@@ -380,6 +501,10 @@ export const postgresSource: ScannerSource = {
 
   async stocksOverview() {
     return (await query<Raw>(STOCK_OVERVIEW_SQL, [null])).map(mapStockOverview);
+  },
+
+  async orbStrategy() {
+    return (await query<Raw>(ORB_STRATEGY_SQL)).map(mapOrbRow);
   },
 
   async deliveries(signalIds: number[]) {

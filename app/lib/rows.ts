@@ -19,6 +19,7 @@ import type {
   EventRow,
   HistoryRow,
   InstrumentRow,
+  OrbRow,
   RsiBias,
   SignalRow,
   SectorQuoteRow,
@@ -347,6 +348,33 @@ export function mapDailyRsiPoint(row: Raw): DailyRsiPoint {
     trading_date: text(row.trading_date) ?? "",
     close: num(row.close) ?? 0,
     rsi14: num(row.rsi14) ?? 0,
+  };
+}
+
+export function mapOrbRow(row: Raw): OrbRow {
+  return {
+    instrument_id: int(row.instrument_id),
+    symbol: text(row.symbol) ?? "",
+    trading_symbol: text(row.trading_symbol) ?? "",
+    company_name: text(row.company_name),
+    session_date: text(row.session_date),
+    or_high: num(row.or_high),
+    or_low: num(row.or_low),
+    or_bars: optionalInt(row.or_bars),
+    bu_at: time(row.bu_at),
+    bu_close: num(row.bu_close),
+    bu_volume: num(row.bu_volume),
+    bu_ratio: num(row.bu_ratio),
+    bd_at: time(row.bd_at),
+    bd_close: num(row.bd_close),
+    bd_volume: num(row.bd_volume),
+    bd_ratio: num(row.bd_ratio),
+    latest_at: time(row.latest_at),
+    latest_close: num(row.latest_close),
+    session_vwap: num(row.session_vwap),
+    ema9: num(row.ema9),
+    ema20: num(row.ema20),
+    snap_at: time(row.snap_at),
   };
 }
 

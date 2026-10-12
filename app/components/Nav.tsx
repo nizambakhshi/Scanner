@@ -9,6 +9,7 @@ const LINKS = [
   { href: "/", label: "Board" },
   { href: "/watchlist", label: "Watchlist" },
   { href: "/stocks", label: "Stocks" },
+  { href: "/strategy", label: "Strategy" },
   { href: "/signals", label: "Alerts" },
   { href: "/history", label: "Days" },
   { href: "/health", label: "Health" },

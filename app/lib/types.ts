@@ -162,6 +162,83 @@ export type WeeklyRsiPoint = {
   rsi14: number;
 };
 
+/**
+ * One row of the /strategy ORB board, for one instrument and the newest trading
+ * session that has 1-minute data: the opening range (the 9:15–9:20 IST five
+ * minutes), the first 5-minute candle whose *close* left that range, the
+ * confirmation readings, and the newest 5-minute close.
+ *
+ * Every field is computed from `candles_1m` except the EMA pair, which comes
+ * from the newest `indicator_snapshots` row of the session (the worker's
+ * streaming EMA carries across sessions and cannot be replayed from one
+ * session's bars). Nulls mean "the session has not produced this yet" — a
+ * breakout that has not happened is null, never a placeholder.
+ */
+export type OrbRow = {
+  instrument_id: number;
+  symbol: string;
+  trading_symbol: string;
+  company_name: string | null;
+  /** The session this board describes (YYYY-MM-DD, IST). Null on an empty DB. */
+  session_date: string | null;
+  or_high: number | null;
+  or_low: number | null;
+  /** 1-minute bars the range is built from — 5 is a full range, fewer is thin. */
+  or_bars: number | null;
+  /** First 5-minute close above the range high (after 9:20). */
+  bu_at: string | null;
+  bu_close: number | null;
+  bu_volume: number | null;
+  /** Breakout-candle volume ÷ average 5-minute volume before it (null: no volume history). */
+  bu_ratio: number | null;
+  /** First 5-minute close below the range low (after 9:20). */
+  bd_at: string | null;
+  bd_close: number | null;
+  bd_volume: number | null;
+  bd_ratio: number | null;
+  /** Newest 5-minute close of the session (may still be forming live). */
+  latest_at: string | null;
+  latest_close: number | null;
+  /** Session VWAP over every 1-minute candle so far — Σ(TP·V)/ΣV, the worker's formula. */
+  session_vwap: number | null;
+  /** 1-minute EMA 9/20 from the newest snapshot; null when the worker has not scanned this symbol. */
+  ema9: number | null;
+  ema20: number | null;
+  snap_at: string | null;
+};
+
+/** Which side of the range the first breakout left through. */
+export type OrbDirection = "UP" | "DOWN";
+
+export type OrbStatus = "NO_DATA" | "OPENING" | "INSIDE" | "BROKE_UP" | "BROKE_DOWN";
+
+/**
+ * The derived view the table renders — see `lib/orb.ts` for `deriveOrb`, which
+ * is where the strategy arithmetic lives so it can be unit-tested without a
+ * database. `null` on an agreement flag means "cannot be judged" (no breakout
+ * direction yet, or no EMA/VWAP reading), which is deliberately distinct from
+ * `false` ("judged, and it fails").
+ */
+export type OrbView = {
+  row: OrbRow;
+  status: OrbStatus;
+  direction: OrbDirection | null;
+  /** A breakout happened, but the newest close is back inside the range. */
+  retreated: boolean;
+  width: number | null;
+  /** Range width as a percentage of the range low — comparable across price levels. */
+  width_pct: number | null;
+  stop: number | null;
+  target1: number | null;
+  target2: number | null;
+  vwap_side: "above" | "below" | null;
+  vwap_agrees: boolean | null;
+  volume_agrees: boolean | null;
+  ema_agrees: boolean | null;
+  /** A breakout whose three filter checks all pass — the strategy's full setup. */
+  confirmed: boolean;
+};
+
 export type SignalType =
   | "BULLISH_ENTRY"
   | "WATCHLIST_ADDED"
@@ -403,6 +480,9 @@ export interface ScannerSource {
   /** The /stocks directory: every instrument the worker scans, the newest
    *  daily bar, the fundamentals and the two-timeframe RSI. */
   stocksOverview(): Promise<StockOverviewRow[]>;
+  /** The /strategy ORB board: the newest session's opening range, first
+   *  breakout and confirmation readings for every instrument. */
+  orbStrategy(): Promise<OrbRow[]>;
   deliveries(signalIds: number[]): Promise<DeliveryRow[]>;
   sectorQuotes(): Promise<SectorQuoteRow[]>;
 }
