@@ -5,6 +5,7 @@ import { env } from "@/lib/env";
 import { source } from "@/lib/source";
 import { LoginForm } from "@/components/LoginForm";
 import { SimulatedBanner } from "@/components/SimulatedBanner";
+import { ThemeToggle } from "@/components/ThemeToggle";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +25,14 @@ export default async function LoginPage() {
 
   return (
     <div className="min-h-screen">
+      {/* The palette is chosen before sign-in as well: this is the page an operator
+          sees first, and a board they cannot read is a bad way to start a session.
+          In flow above the banner rather than pinned over it — the banner wraps on a
+          narrow screen, and a control that lands on top of "SIMULATED DATA" is worse
+          than a control that sits one row higher. */}
+      <div className="flex justify-end px-4 pt-3">
+        <ThemeToggle />
+      </div>
       <SimulatedBanner meta={meta} />
       <div className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-[1400px] items-center justify-center px-4 py-10">
         <div className="w-full max-w-[380px]">

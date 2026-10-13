@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { SignOutButton } from "./SignOutButton";
+import { ThemeToggle } from "./ThemeToggle";
 import { sessionClock, type SessionPhase } from "@/lib/market-clock";
 
 const LINKS = [
@@ -52,7 +53,10 @@ export function Nav({ email }: { email: string }) {
 
         <div className="flex items-center gap-3">
           <SessionStrip />
-          <RefreshButton />
+          <div className="flex items-center gap-1.5">
+            <ThemeToggle />
+            <RefreshButton />
+          </div>
           <span className="hidden max-w-[180px] truncate text-[12px] text-muted md:inline" title={email}>
             {email}
           </span>

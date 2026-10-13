@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Barlow, Barlow_Semi_Condensed, IBM_Plex_Mono } from "next/font/google";
+import { themeInitScript } from "@/lib/theme";
 import "./globals.css";
 
 /**
@@ -41,10 +42,28 @@ export const metadata: Metadata = {
  * route group, which is where the session check happens. The login form is outside
  * it by necessity — a page that demands a session before it can create one is a
  * redirect loop.
+ *
+ * `data-theme` starts as the night board and the inline script in the head may
+ * flip it to daylight before the first paint, so the stored choice never arrives as
+ * a flash: an operator reloading mid-session should get the same board back
+ * instantly. The attribute is also on the server HTML so a browser with JS disabled
+ * still gets a coherent (default) palette rather than unstyled tokens.
  */
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${barlow.variable} ${barlowCondensed.variable} ${plexMono.variable}`}>
+    <html lang="en" data-theme="dark" className={`${barlow.variable} ${barlowCondensed.variable} ${plexMono.variable}`}>
+      <head>
+        {/*
+          A plain inline script, deliberately not `next/script`: with
+          `strategy="beforeInteractive"` Next queues the children and runs them with
+          its own loader, which is after the first paint — verified in the browser,
+          where a stored light choice came back as a dark board on every fresh load.
+          Inline in the head is the only position that is certain to run before the
+          body paints, which is the whole point: the operator's board must never
+          repaint under them as the page arrives.
+        */}
+        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+      </head>
       <body className="min-h-screen antialiased">{children}</body>
     </html>
   );

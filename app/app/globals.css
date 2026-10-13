@@ -10,6 +10,12 @@
   only interactive hue. Numbers are IBM Plex Mono with tabular figures so a
   column of prices reads as a scale; labels and legends are Barlow Semi
   Condensed, compact and uppercase, the way an instrument prints its face.
+
+  The night board below is the default. `html[data-theme="light"]` further down
+  redraws the same instrument in daylight; the theme button in the chrome switches
+  between them and remembers the choice. Every colour a component uses is one of
+  these tokens, so switching is a token swap and no component knows which board it
+  is on — including the SVG charts, which read these same variables.
 */
 
 @theme {
@@ -40,6 +46,41 @@
   --font-sans: var(--font-barlow), ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
   --font-display: var(--font-barlow-condensed), var(--font-barlow), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-plex-mono), ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, monospace;
+}
+
+/*
+  The same board in daylight.
+
+  Nothing here is an inversion of the dark values; it is the instrument redrawn on
+  paper. The hue family is kept — a cool blue-grey ground and blue-black ink — so
+  it is recognisably the same tool. Panels go to white because on a light ground
+  the ground must recede and the panel must be the brightest area, which is the
+  opposite of the night board. Every signal hue darkens until it carries at least
+  4.5:1 as text on white: the acid green and electric blue of the night board are
+  unreadable on paper, so they become evergreen, brick and cobalt. `muted-2` stays
+  the step furthest from the ink, which on paper means the palest.
+*/
+html[data-theme="light"] {
+  color-scheme: light;
+
+  --color-surface-2: #e7ecf3; /* the ground under the panels; recessed chips */
+  --color-surface: #ffffff;   /* panel */
+  --color-hover: #eff3f9;     /* one step of tint over a panel — hover state */
+
+  --color-line: #d9e0ea;      /* card edge, row rule */
+  --color-line-2: #bfcadc;    /* chips, inputs, hovered edges */
+
+  --color-ink: #0d1620;       /* primary */
+  --color-ink-2: #3b4757;     /* secondary */
+  --color-muted: #5d6a7d;     /* labels, hints, axis text */
+  --color-muted-2: #8a97a9;   /* the dimmest step — quiet marks only, still ~3:1 */
+
+  --color-accent: #2c5fe0;    /* links, focus — the only interactive hue */
+  --color-positive: #087f46;  /* up, qualified, delivered */
+  --color-negative: #cf3220;  /* down, failed, stale */
+  --color-amber: #a76308;     /* needs attention, not broken */
+  --color-sim: #6a44d8;       /* simulated data — violet, never a direction */
+  --color-ema9: #00738f;      /* the fast EMA line on the execution chart */
 }
 
 html {
@@ -78,6 +119,18 @@ body {
 
 .dot-live {
   animation: livepulse 2.2s ease-out infinite;
+}
+
+/* The theme button is the one moment the whole screen may move: the two boards
+   cross over in a fifth of a second instead of snapping. Nothing else transitions
+   a background, and reduced-motion users get an instant switch. */
+@media (prefers-reduced-motion: no-preference) {
+  body,
+  .card {
+    transition:
+      background-color 160ms ease-out,
+      border-color 160ms ease-out;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
