@@ -36,3 +36,11 @@ app/next-env.d.ts
 # ── Local data caches (instrument master downloads) ────────────────────────
 data/cache/
 *.tmp
+
+# ── Generated local state (never commit) ───────────────────────────────────
+# Supabase CLI writes a version marker here on every command.
+supabase/.temp/
+# The real edge gate lives under /opt/homebrew/etc/pgbouncer; these are only
+# leftovers from running install_edge.sh on a dev machine.
+ops/db-edge/certs/
+ops/db-edge/*.local
