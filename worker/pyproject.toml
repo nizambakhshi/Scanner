@@ -37,6 +37,12 @@ include = ["worker*"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-q --strict-markers"
+# The suite imports shared fixtures as `from tests.conftest import …`, and `tests`
+# is a namespace directory beside this file — the editable install only ships
+# `worker*`. Without this line the import resolves only when pytest is started as
+# `python -m pytest` (which prepends the cwd); a bare `pytest`, as CI and a fresh
+# checkout run it, dies with "No module named 'tests'".
+pythonpath = ["."]
 markers = [
     "integration: requires a real PostgreSQL database (DATABASE_URL)",
     "live: requires real Angel One credentials (never run in CI)",

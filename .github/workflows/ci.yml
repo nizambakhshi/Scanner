@@ -21,7 +21,11 @@ permissions:
   contents: read
 
 env:
-  CI_DSN: postgresql://postgres:ci@localhost:5432/scanner_ci
+  # sslmode=disable is explicit, not cosmetic: the worker's `_conninfo_with_tls`
+  # appends `sslmode=require` to any DSN that does not already mention sslmode, and
+  # the service container may or may not have a certificate to answer it. The same
+  # trade-off is documented in ops/db-edge/README.md for the Mini.
+  CI_DSN: postgresql://postgres:ci@localhost:5432/scanner_ci?sslmode=disable
 
 jobs:
   migrations-and-worker:
