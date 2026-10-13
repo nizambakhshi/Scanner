@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Keeps EDGE_HOSTNAME pointed at this Mini's public IP. Load with:
-       launchctl load -w ~/Library/LaunchAgents/com.scanner.edge-ddns.plist
-     (install_edge.sh does not touch this; the README explains when to enable it.)
+<!-- Keeps EDGE_HOSTNAME pointed at this Mini's public IP. Install with:
+       ops/db-edge/install_ddns.sh
+     Do NOT just copy this file and load it: launchd's /usr/bin/python3 has no TCC
+     permission to read a script inside Desktop, Documents or Downloads, so a job
+     pointing here fails with "Operation not permitted" on every tick. The installer
+     copies ddns_update.py to ~/.config/scanner-edge/ and rewrites this one path.
      /usr/bin/python3 on purpose: the updater is stdlib-only, so it does not depend
      on a virtualenv that could be deleted during a weekend experiment. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

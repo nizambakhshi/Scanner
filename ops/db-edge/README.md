@@ -79,14 +79,21 @@ CONF
 chmod 600 ~/.config/scanner-edge/edge.env
 ```
 
-Check it, then load it so it survives reboots:
+Check it, then install the updater as a launchd job:
 
 ```bash
-python3 ops/db-edge/ddns_update.py
-mkdir -p ~/Library/LaunchAgents
-cp ops/db-edge/com.scanner.edge-ddns.plist ~/Library/LaunchAgents/
-launchctl load -w ~/Library/LaunchAgents/com.scanner.edge-ddns.plist
+python3 ops/db-edge/ddns_update.py    # what it sees right now (with EDGE_PROVIDER=none it changes no DNS)
+ops/db-edge/install_ddns.sh           # copies the script, writes the job, loads it, runs it once
+ops/db-edge/install_ddns.sh --check   # state only, changes nothing
 ```
+
+Do **not** copy `com.scanner.edge-ddns.plist` into `~/Library/LaunchAgents` and load
+it as the repo has it: macOS protects Desktop, Documents and Downloads with TCC, so a
+launchd job running `/usr/bin/python3` cannot read a script living in the repository —
+it fails with `can't open file '…': [Errno 1] Operation not permitted` on every tick,
+silently. `install_ddns.sh` therefore copies `ddns_update.py` to
+`~/.config/scanner-edge/` and rewrites that one path in the installed plist. The repo
+file stays as the readable reference for the schedule and keys.
 
 The updater asks three public services what address it sees for us (one outage is not
 an address change), refuses to do anything if that address is private — carrier NAT

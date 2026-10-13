@@ -65,7 +65,21 @@ else
   esac
 fi
 
-section "5. the hostname Vercel will use"
+section "5. the hostname Vercel will use, and the job that keeps it current"
+if launchctl list com.scanner.edge-ddns >/dev/null 2>&1; then
+  ok "the IP-change updater is loaded in launchd (every 5 min, and at login)"
+else
+  note "updater job not loaded — run ops/db-edge/install_ddns.sh (until then a changed ISP address breaks production)"
+fi
+if [ -s "$HOME/Library/Logs/scanner-edge-ddns.log" ]; then
+  if tail -1 "$HOME/Library/Logs/scanner-edge-ddns.log" | grep -q "can't open file"; then
+    no "the updater cannot read its script: launchd has no TCC access to Desktop/Documents. Reinstall with install_ddns.sh, which copies it to ~/.config/scanner-edge/"
+  else
+    ok "updater's newest log line: $(tail -1 "$HOME/Library/Logs/scanner-edge-ddns.log")"
+  fi
+else
+  note "no updater log yet at ~/Library/Logs/scanner-edge-ddns.log"
+fi
 if [ -z "$EDGE_HOSTNAME" ]; then
   note "EDGE_HOSTNAME is not set in $EDGE_ENV — the IP-change handling is not active yet"
 else
