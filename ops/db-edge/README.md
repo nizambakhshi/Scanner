@@ -11,8 +11,8 @@ production needs a path across the public internet. This directory is that path.
 | --- | --- | --- | --- |
 | Supabase Postgres | Docker (OrbStack) | host `54322` → container `5432` | the real database; Studio, PostgREST and local dev keep using it |
 | PgBouncer, the edge gate | launchd (`brew services`) | `6543` on every interface | the **only** port meant to be reachable from outside |
-| Router | house gateway | forwards `25432` → `192.168.1.35:6543` | **one of the two steps still to do** |
-| DDNS updater | launchd, every 5 min | — | republishes `EDGE_HOSTNAME` when the ISP changes the address |
+| Router | house gateway | forwards `25432` → `192.168.1.35:6543` | **still to do — verified closed from outside on 2026-10-13** |
+| DDNS updater | launchd (`com.scanner.edge-ddns`), every 5 min | — | installed and running; republishes `EDGE_HOSTNAME` when the ISP changes the address. Inert until `EDGE_PROVIDER` is more than `none` |
 
 Local traffic does not go through the gate: `app/.env.local` and `worker/.env`
 connect to `127.0.0.1:54322` as `postgres`, which is what migrations and Studio
