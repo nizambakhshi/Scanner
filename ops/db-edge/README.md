@@ -110,9 +110,18 @@ Give the Mini a static DHCP lease (`192.168.1.35`) so the rule stays valid.
 Then:
 
 ```bash
-ops/db-edge/verify.sh            # should end with "0 failed"
-ops/db-edge/vercel_dsn.sh        # the two values to paste
+ops/db-edge/check_tcp.sh 119.42.57.64:25432   # prove the router rule works right away,
+                                              # before any hostname exists
+ops/db-edge/verify.sh                         # the whole checklist, LAN and outside
+ops/db-edge/vercel_dsn.sh                     # the two values to paste
 ```
+
+`check_tcp.sh` asks ~54 machines in ~30 countries to open the port and reports what
+they saw: `open`, `refused` (the router forwards but nothing listens) or `filtered`
+(no forward, or the ISP drops inbound). It needs an outside vantage because from inside
+the LAN the router either hairpins and answers, or refuses and hides — either way the
+test would lie. One node claiming success while the rest time out is treated as closed:
+a probe from Ukraine once reported a 1.7 ms handshake to Mumbai, which is not physical.
 
 ## Setting production
 

@@ -6,6 +6,7 @@
 # Read-only. Safe to run any time, including while the scanner is mid-session.
 set -uo pipefail
 
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CONF=${SCANNER_EDGE_CONF:-$HOME/.config/scanner-edge}
 EDGE_ENV="$CONF/edge.env"
 PSQL=$(command -v psql || echo /opt/homebrew/opt/postgresql@17/bin/psql)
@@ -34,6 +35,14 @@ lsof -nP -iTCP:6543 -sTCP:LISTEN >/dev/null 2>&1 \
 brew services info pgbouncer 2>/dev/null | grep -qi 'Running: true' \
   && ok "managed by launchd, so it comes back after a reboot" \
   || note "not running as a brew service: a reboot would leave the gate closed"
+lan_ip=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null)
+if [ -n "$lan_ip" ]; then
+  nc -z -w 2 "$lan_ip" 6543 2>/dev/null \
+    && ok "the gate answers on the LAN address ${lan_ip}:6543, so binding and the host firewall are not the obstacle" \
+    || no "the gate does not answer on ${lan_ip}:6543 — listen_addr or the macOS firewall is blocking before routing even matters"
+else
+  note "no LAN address found (ipconfig getifaddr) — could not test the gate on a non-loopback interface"
+fi
 
 section "3. what the gate allows"
 EDGE_PW=$(security find-generic-password -a scanner_edge -s scanner-edge-postgres -w 2>/dev/null) \
@@ -92,19 +101,19 @@ else
 fi
 
 section "6. the road in from outside"
-if [ -z "$EDGE_HOSTNAME" ]; then
-  note "skipped: set EDGE_HOSTNAME first"
+# Probe the public address even before EDGE_HOSTNAME exists, so the router rule can
+# be validated the moment it is saved. A local connect cannot answer this question:
+# from inside the LAN the router either hairpins (and answers) or refuses (and hides).
+TARGET=${EDGE_HOSTNAME:-$WAN}
+if [ -z "$TARGET" ]; then
+  note "nothing to probe — no hostname set and no public address seen"
 else
-  # A third party has to do this connect: from inside the LAN the router often
-  # hairpins (or refuses to), so a local test proves nothing either way.
-  probe=$(/usr/bin/curl -s --max-time 15 \
-    "https://api.yougetsignal.com/tools/web-sites-on-web-server/php/get-web-server-monitoring-data.php?remote_address=${EDGE_HOSTNAME}&port=${EDGE_PUBLIC_PORT}&flag=1" \
-    2>/dev/null)
-  case "$probe" in
-    *'"portOpen":true'*|*'"accepted":true'*) ok "an outside host reached $EDGE_HOSTNAME:$EDGE_PUBLIC_PORT" ;;
-    *'"portOpen":false'*|*'"accepted":false'*)
-      no "an outside host could not reach $EDGE_HOSTNAME:$EDGE_PUBLIC_PORT — the router is not forwarding" ;;
-    *) note "the port-check service did not answer in a known shape: ${probe:0:120}" ;;
+  [ "$TARGET" = "$WAN" ] && printf '  note  probing the bare WAN address; the hostname comes from step 5\n'
+  probe=$("$HERE/check_tcp.sh" "${TARGET}:${EDGE_PUBLIC_PORT}" 2>&1)
+  case $? in
+    0) ok "outside hosts reached ${TARGET}:${EDGE_PUBLIC_PORT} — $(printf '%s' "$probe" | head -1)" ;;
+    1) no "${TARGET}:${EDGE_PUBLIC_PORT} is not reachable from outside — $(printf '%s' "$probe" | head -1)" ;;
+    *) note "the outside probe could not decide — $(printf '%s' "$probe" | head -1)" ;;
   esac
 fi
 
