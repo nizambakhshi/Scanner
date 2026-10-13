@@ -23,6 +23,46 @@ They communicate only through PostgreSQL. A dashboard that is compromised, cache
 screenshot cannot place a trade or send a message, because it cannot reach either
 capability.
 
+## Two environments
+
+The live app and the work-in-progress app are two copies of this repository on two
+databases, so a half-finished screen is never what an operator is looking at during a
+session.
+
+| | Live | Staging |
+| --- | --- | --- |
+| Directory | `~/Desktop/Scanner` | `~/Desktop/Scanner-staging` |
+| Git | branch `main`, pushed to GitHub | branch `staging`, kept local |
+| Dashboard | Vercel, plus `localhost:3000` as a mirror of it — both read **Supabase Mumbai** | `127.0.0.1:3100` — reads the **Mac Mini's own Postgres** on 54322 |
+| Worker | `worker/`, `WORKER_ID=worker-local` | `Scanner-staging/worker/`, `WORKER_ID=worker-staging` |
+| Telegram | delivered from this copy | `TELEGRAM_*` blank on purpose: this copy must not send a second copy of an alert |
+
+The env files are gitignored, so each copy carries its own credentials and its own
+`DATABASE_URL`; everything about the split that *is* in the code is two npm scripts and
+one diagnostic. A feature is written in `Scanner-staging`, checked against the Mini, then
+`git checkout main && git merge staging` ships it and Vercel redeploys `main` on Mumbai.
+
+Two rules make the arrangement hold:
+
+- **Do not push `staging`.** A push makes Vercel build a preview deployment, and a
+  preview is handed production's `DATABASE_URL` — an untested screen would be reading,
+  and through the admin routes writing, the live database.
+- **Open staging at `http://127.0.0.1:3100`, never `http://localhost:3100`.** The session
+  cookie is keyed by host name, so two spellings of the same machine let the two copies
+  trade cookies and log each other out. Their `AUTH_SESSION_SECRET` values differ, so the
+  symptom is a login page that keeps rejecting a correct password.
+
+The staging worker holds a **second, simultaneous SmartAPI session on the same client
+code**, which is what it takes to feed the Mini with live data. If Angel One ever
+invalidates the live worker's login when a second one appears, set `SCAN_MODE=simulation`
+in `Scanner-staging/worker/.env`: it replays synthetic ticks, touches no broker endpoint,
+and keeps the Mini's tables full for UI work.
+
+To answer "which database is this copy really talking to" — worth asking before any test
+that writes — run `npm run which-db` inside a copy's `app/`. It prints the masked
+connection string, the TLS mode, and `inet_server_addr()` as reported by the server
+itself, which is the one field that cannot lie about which cluster answered.
+
 ## What "qualified" means
 
 A symbol joins the watchlist when, on a **completed** 1-minute candle:
