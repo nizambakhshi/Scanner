@@ -123,8 +123,27 @@ the LAN the router either hairpins and answers, or refuses and hides — either 
 test would lie. One node claiming success while the rest time out is treated as closed:
 a probe from Ukraine once reported a 1.7 ms handshake to Mumbai, which is not physical.
 
-## Setting production
+### If the router cannot forward
 
+Some ISPs put the house behind carrier NAT (then `ddns_update.py` refuses to act, and
+no rule will ever work), and some stock router firmwares have no port-forward screen.
+The fallback is a cheap relay: a small VPS that the Mini dials *out* to, and reverse-forwards
+the gate's port onto the public box.
+
+```bash
+ssh -nNT -R 25432:127.0.0.1:6543 relay@your-vps   # Vercel then connects to your-vps:25432
+```
+
+Keep it up with a LaunchAgent like the DDNS one, add `ServerAliveInterval 30` and
+`ExitOnForwardFailure yes`, and bind the relay side to the loopback address
+(`GatewayPorts clientspecified` + `*:25432` only if you want it public). The gate's TLS
+and single-user rules still apply — the relay changes the road, not the door.
+
+A Cloudflare **TCP** tunnel is not a substitute here: it needs `cloudflared access tcp`
+running on the client side, and there is no place to put that inside a Vercel function.
+Tailscale has the same problem in reverse — Vercel cannot join your mesh.
+
+## Setting production
 Vercel's CLI is not logged in on this machine, so this is a dashboard action:
 Project → Settings → Environment Variables → set `DATABASE_URL` and `DATABASE_SSL`
 for Production (and Preview if you want it), then Production → Deployments →
