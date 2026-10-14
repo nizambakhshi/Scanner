@@ -28,16 +28,25 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import signal
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
 
 from .alerts import AlertEngine
+from .analytics.breakouts import StrategiesConfig, parse_strategies, unknown_strategies_in
 from .analytics.indicators import IndicatorRegistry
 from .analytics.rsi import BEARISH, BULLISH
-from .config import ConfigError, ScannerParams, WorkerSettings, load_settings, safe_summary
+from .config import (
+    ConfigError,
+    ScannerParams,
+    TelegramSettings,
+    WorkerSettings,
+    load_settings,
+    safe_summary,
+)
 from .dispatcher import Dispatcher
 from .logging_setup import configure_logging, get_logger, scrub
 from .marketdata.candle_builder import CandleEngine
@@ -84,6 +93,11 @@ RETENTION_LOOP_SECONDS = 6 * 3600.0
 #: after the process stopped feeding (observed 2026-10-12: the board showed a
 #: worker that had died at 13:24 as live until the next open).
 IDLE_HEARTBEAT_SECONDS = 60.0
+#: How often the running worker re-reads the two ``ops_settings`` documents the
+#: /alerts page writes. A minute is short enough that saving a Telegram token or
+#: flipping a strategy feels immediate, and long enough that the poll is a rounding
+#: error next to the retention loop it lives beside.
+ALERT_SETTINGS_POLL_SECONDS = 60.0
 
 
 def _rsi_message(state: RsiState) -> str:
@@ -113,6 +127,15 @@ class WorkerRuntime:
     #: (see :meth:`_adopt_scanner_config`) — the dashboard's edit path writes
     #: that table, so this field is what makes a saved config actually run.
     params: ScannerParams = field(init=False)
+    #: The armed level-break strategies. Env has none: the shipped defaults stand
+    #: until ``ops_settings['alert_strategies']`` says otherwise.
+    strategies: StrategiesConfig = field(init=False, default_factory=StrategiesConfig)
+    #: Telegram credentials this process sends with. Starts from the environment
+    #: and is overridden by ``ops_settings['telegram']`` when the dashboard holds them.
+    telegram: TelegramSettings = field(init=False)
+    _telegram_fingerprint: str = field(default="", repr=False)
+    _telegram_source: str = field(default="env", repr=False)
+    _strategies_source: str = field(default="defaults", repr=False)
     _config_version: int | None = field(default=None, repr=False)
     _tasks: list[asyncio.Task[Any]] = field(default_factory=list, repr=False)
     _lease_holder: str = field(default="", repr=False)
@@ -126,6 +149,7 @@ class WorkerRuntime:
 
     def __post_init__(self) -> None:
         self.params = self.settings.scanner
+        self.telegram = self.settings.telegram
 
     # ── construction ──────────────────────────────────────────────────────
 
@@ -264,6 +288,7 @@ class WorkerRuntime:
         self.window = window
         self.session = await self._resolve_session(window)
         await self._adopt_scanner_config()
+        await self._adopt_alert_settings()
         instruments = await self._load_instruments()
         if not instruments:
             log.error(
@@ -279,6 +304,7 @@ class WorkerRuntime:
             now=now_ist(), rest=self._rest, fetch_historical=self._rest is not None
         )
         log.info("warmup_complete", **{k: v for k, v in warmup.items() if not isinstance(v, dict)})
+        await self._recover_breakout_levels()
         await self._start_feed(instruments)
         self._spawn_support_tasks()
         log.info(
@@ -292,6 +318,44 @@ class WorkerRuntime:
         await self._emit_rsi_transitions(self.session, instruments)
         await self._minute_loop(window)
         return 0
+
+    async def _recover_breakout_levels(self) -> None:
+        """Rebuild today's levels when today's tape is already in the database.
+
+        A fresh 09:15 open has nothing to recover. A worker that comes up at 11:40 —
+        after a crash, a deploy, or a Mini that slept — would otherwise spend the
+        rest of the day with no opening range and a day high made of afternoon
+        candles, so the first genuine new high after the restart would be judged
+        against the wrong level. The minutes are already stored; replaying them
+        through the detector rebuilds exactly what the live tape would have built,
+        *silently* — those alerts were judged when they happened, and re-paging the
+        operator for 09:20 at 11:40 is not a recovery, it is spam.
+        """
+        pipeline = self.pipeline
+        if pipeline is None or self.session is None:
+            return
+        try:
+            stored_candles = await self.store.count_candles_for_session(self.session.id)
+        except Exception as exc:  # noqa: BLE001 — a counting hiccup must not stop the day
+            log.warning(
+                "breakout_recovery_skipped",
+                error=scrub(f"{type(exc).__name__}: {exc}")[:200],
+                note="levels start from the live tape; a mid-day restart sees no ORB today",
+            )
+            return
+        if stored_candles == 0:
+            log.info("breakout_levels_seeded_from_live_tape", candles_in_session=0)
+            return
+        try:
+            summary = await pipeline.recover_breakouts()
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "breakout_recovery_failed",
+                error=scrub(f"{type(exc).__name__}: {exc}")[:200],
+                action_required="level breaks may misjudge today's first new high",
+            )
+            return
+        log.info("breakout_recovery_complete", candles_in_session=stored_candles, **summary)
 
     async def _resolve_session(self, window: SessionWindow) -> SessionRow:
         """Reuse today's open session after a restart; never silently duplicate it."""
@@ -366,6 +430,158 @@ class WorkerRuntime:
             removal_confirm_candles=row.params.removal_confirm_candles,
         )
 
+    async def _adopt_alert_settings(self) -> dict[str, Any]:
+        """Arm the detectors and the Telegram credentials from ``ops_settings``.
+
+        Two documents the /alerts page owns, read the same way the retention knob
+        is read: the dashboard is the writer, the worker is the reader, and a value
+        this process cannot parse is *reported* rather than quietly replaced by a
+        default — a page that says "armed" while the detector never runs is the
+        failure mode this feature cannot have.
+
+        * ``alert_strategies`` — the three level-break strategies and their knobs.
+          Malformed → the previously adopted document stays in force.
+        * ``telegram`` — bot token and chat id. The environment remains the
+          fallback, so a database that has never seen the page still delivers what
+          ``TELEGRAM_BOT_TOKEN`` was wired for. The token itself is never logged and
+          never leaves this method; only a hash of it is kept, to notice a change.
+        """
+        summary: dict[str, Any] = {
+            "strategies": self._strategies_source,
+            "telegram": self._telegram_source,
+        }
+        try:
+            document = await self.store.get_ops_setting("alert_strategies")
+        except Exception as exc:  # noqa: BLE001 — an unreadable knob must not stop the day
+            log.warning(
+                "alert_strategies_read_failed",
+                error=scrub(f"{type(exc).__name__}: {exc}")[:200],
+                note="detectors stay on the configuration already in force",
+            )
+            document = None
+        if document is not None:
+            try:
+                parsed = parse_strategies(document)
+            except ValueError as exc:
+                log.error(
+                    "alert_strategies_invalid",
+                    error=scrub(str(exc))[:300],
+                    action_required="re-save /alerts; the stored document cannot be obeyed",
+                )
+            else:
+                unknown = unknown_strategies_in(document)
+                if unknown:
+                    log.warning("alert_strategies_unknown", names=unknown)
+                if parsed != self.strategies:
+                    self.strategies = parsed
+                    self._strategies_source = "ops_settings"
+                    log.info("alert_strategies_adopted", source="ops_settings", **parsed.summary())
+        else:
+            log.info(
+                "alert_strategies_fallback",
+                source="built-in-defaults",
+                note="no ops_settings['alert_strategies'] row; the shipped defaults run",
+                **self.strategies.summary(),
+            )
+        try:
+            credentials = await self.store.get_ops_setting("telegram")
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "telegram_setting_read_failed",
+                error=scrub(f"{type(exc).__name__}: {exc}")[:200],
+                note="staying on the environment credentials",
+            )
+            credentials = None
+        if credentials:
+            token = str(credentials.get("bot_token") or "").strip()
+            chat_id = str(credentials.get("chat_id") or "").strip()
+            if token and chat_id:
+                # `enabled` is the page's master switch; a saved token that the
+                # operator switched off must not page the phone just because it
+                # is still sitting in the row.
+                enabled = credentials.get("enabled")
+                self.telegram = replace(
+                    self.settings.telegram, bot_token=token, chat_id=chat_id
+                )
+                if isinstance(enabled, bool) and not enabled:
+                    # Blanked rather than left configured: `configured` is what the
+                    # alert engine gates on, so switching off must switch off.
+                    self.telegram = replace(self.telegram, bot_token="", chat_id="")
+                self._telegram_source = "ops_settings"
+            else:
+                # A half-filled row — a chat id with no token, or the reverse — is an
+                # incomplete save, not a credential source. The env stays in force and
+                # the page's own validation is what the operator has to satisfy.
+                log.warning(
+                    "telegram_row_incomplete",
+                    note="bot_token and chat_id must both be present; keeping the "
+                    "environment credentials",
+                    has_token=bool(token),
+                    has_chat_id=bool(chat_id),
+                )
+        elif self._telegram_source != "env":
+            # The row was deleted since the last read: the environment is the
+            # credential source again rather than a stale copy of the old page.
+            self.telegram = self.settings.telegram
+            self._telegram_source = "env"
+        summary["telegram"] = self._telegram_source
+        summary["strategies"] = self._strategies_source
+        summary["telegram_configured"] = self.telegram.configured
+        self._apply_alert_settings()
+        return summary
+
+    def _apply_alert_settings(self) -> None:
+        """Push whatever was just adopted into the live objects, without a restart.
+
+        The sender and the alert engine hold the credentials they queue with, so a
+        token saved mid-session takes effect on the next queued message rather than
+        the next open. Levels are deliberately preserved by ``reconfigure``: an
+        opening range is a fact about the morning, not about the configuration.
+        """
+        pipeline = self.pipeline
+        if pipeline is not None:
+            pipeline.reconfigure_breakouts(self.strategies)
+        # Over token *and* chat id: pasting a different chat id is a change that has
+        # to reach the sender, and neither value can be logged, so neither is echoed.
+        fingerprint = hashlib.sha256(
+            f"{self.telegram.bot_token}\n{self.telegram.chat_id}".encode()
+        ).hexdigest()[:12]
+        if fingerprint == self._telegram_fingerprint:
+            return
+        self._telegram_fingerprint = fingerprint
+        if self._sender is not None:
+            self._sender.settings = self.telegram
+        if self._alerts is not None:
+            self._alerts.telegram_enabled = bool(
+                self.settings.notifications_enabled and self.telegram.configured
+            )
+            self._alerts.telegram_chat_id = self.telegram.chat_id
+        # Only the fingerprint travels: a rotated token must be visible in the log
+        # without the token ever appearing in it.
+        log.info(
+            "telegram_credentials_applied",
+            source=self._telegram_source,
+            fingerprint=fingerprint,
+            configured=self.telegram.configured,
+        )
+
+    async def _alert_settings_loop(self) -> None:
+        """Re-read the alert documents, so a save on the page needs no restart."""
+        while not self.stop.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self.stop.wait(), timeout=ALERT_SETTINGS_POLL_SECONDS
+                )
+            if self.stop.is_set():
+                return
+            try:
+                await self._adopt_alert_settings()
+            except Exception as exc:  # noqa: BLE001 — the tape outranks a config hiccup
+                log.warning(
+                    "alert_settings_refresh_failed",
+                    error=scrub(f"{type(exc).__name__}: {exc}")[:200],
+                )
+
     async def _load_instruments(self) -> dict[int, Instrument]:
         rows = await self.store.list_universe(universe=self.params.universe)
         usable = [row for row in rows if row.instrument_token and row.is_active]
@@ -414,13 +630,17 @@ class WorkerRuntime:
             watchlist=watchlist,
             alerts=alerts,
             is_simulated=not self.settings.is_live,
+            strategies=self.strategies,
         )
         if self._recovered_scan_at is not None:
             pipeline.initial_scan_completed = True
         return pipeline
 
     def _build_alerts(self) -> AlertEngine:
-        telegram = self.settings.telegram
+        # ``self.telegram``, not ``self.settings.telegram``: by the time a pipeline is
+        # built the runtime has already adopted whatever the dashboard saved, and the
+        # environment is only the fallback it started from.
+        telegram = self.telegram
         self._sender = TelegramSender(settings=telegram)
         self._alerts = AlertEngine(
             store=self.store,
@@ -605,6 +825,9 @@ class WorkerRuntime:
                 asyncio.create_task(self._sector_flush_loop(), name="sector-flush")
             )
         self._tasks.append(asyncio.create_task(self._retention_loop(), name="retention"))
+        self._tasks.append(
+            asyncio.create_task(self._alert_settings_loop(), name="alert-settings")
+        )
         if self._sender is not None:
             dispatcher = Dispatcher(
                 store=self.store,
