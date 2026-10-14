@@ -133,7 +133,9 @@ export function TelegramPanel({ state, lastChange }: { state: TelegramState; las
           ) : null}
           {state.savedAt ? (
             <>
-              {" "}· saved <span className="num">{dateTime(state.savedAt)}</span>
+              {/* "saved", not "last saved by you": on a database the page has never
+                  been used on, this is the timestamp migration 0010 inserted. */}
+              {" "}· row written <span className="num">{dateTime(state.savedAt)}</span>
             </>
           ) : null}
         </span>
