@@ -184,6 +184,7 @@ class WorkerRuntime:
         window = self.calendar.session(moment.date())
         if phase == SessionPhase.POST_CLOSE:
             log.info("session_already_closed", trading_date=moment.date().isoformat())
+            await self._purge_old_data()  # the market is asleep; this is the window for it
             return 0
         if window is None:
             log.info(
@@ -191,6 +192,7 @@ class WorkerRuntime:
                 trading_date=moment.date().isoformat(),
                 next_trading_day=self.calendar.next_trading_day(moment.date()).isoformat(),
             )
+            await self._purge_old_data()  # candles age on holidays too
             return 0
         if phase in (SessionPhase.CLOSED, SessionPhase.PRE_OPEN):
             existing = await self.store.get_session_for_date(window.trading_date)
@@ -272,7 +274,6 @@ class WorkerRuntime:
             )
             return 4
         await self.store.set_session_status(self.session.id, SessionStatus.IN_PROGRESS.value)
-        await self._purge_old_data()
         self._ensure_client()
         self.pipeline = self._build_pipeline(window, self.session, instruments)
         warmup = await self.pipeline.warm_up(
@@ -647,6 +648,12 @@ class WorkerRuntime:
                     log.info("initial_scan", counts=summary.get("counts"))
             if now >= window.close_at + timedelta(seconds=CLOSE_GRACE_SECONDS):
                 await self._finalize_session(now)
+                # Ageing sweep here, not at the open: this DELETE is the second
+                # most expensive statement in the database (3.1 s per call on the
+                # live pooler, §0009) and at 09:15 it competes with the warm-up
+                # read and the first scans of the day. After the close the only
+                # reader is the dashboard.
+                await self._purge_old_data()
                 return
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.stop.wait(), timeout=MINUTE_LOOP_SECONDS)
@@ -767,12 +774,30 @@ class WorkerRuntime:
             log.info("retention_purge", retention_days=days, deleted=counts)
 
     async def _retention_loop(self) -> None:
+        """Safety net for a session that ran long or restarted mid-day.
+
+        The scheduled sweep is the one after the close (§0009); this tick exists
+        so a worker that never reaches a close still ages its tables. It stays
+        quiet while the market is open — the purge is not allowed to compete
+        with the live scan.
+        """
         while not self.stop.is_set():
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.stop.wait(), timeout=RETENTION_LOOP_SECONDS)
             if self.stop.is_set():
                 continue
+            if self._market_is_live(now_ist()):
+                log.info("retention_deferred", reason="market session is live")
+                continue
             await self._purge_old_data()
+
+    def _market_is_live(self, moment: datetime) -> bool:
+        """True from pre-open to close — the window in which the dashboard is
+        reading candles and the scanner is writing them."""
+        if self.window is None:
+            return False
+        phase = self.calendar.phase_at(moment)
+        return phase in (SessionPhase.PRE_OPEN, SessionPhase.ACTIVE)
 
     async def _sector_flush_loop(self) -> None:
         """Push the tracker's newest-wins buffer into ``sector_quotes`` on a cadence."""

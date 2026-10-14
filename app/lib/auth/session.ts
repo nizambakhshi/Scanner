@@ -99,6 +99,7 @@ export async function createSession(user: SessionUser, request: { ip: string | n
        VALUES ($1::text, $2::bigint, to_timestamp($3::bigint), $4::text, $5::text)`,
       [payload.jti, payload.sub, payload.exp, request.ip, request.userAgent],
     );
+    await pruneDeadSessions();
   }
   const store = await cookies();
   store.set(SESSION_COOKIE, issueToken(payload), {
@@ -109,6 +110,26 @@ export async function createSession(user: SessionUser, request: { ip: string | n
     maxAge: MAX_AGE_SECONDS,
   });
   return payload;
+}
+
+/**
+ * Drop rows that cannot authenticate anything.
+ *
+ * `readToken` rejects a cookie whose `exp` has passed before the database is
+ * consulted, and `expires_at` is that same instant — so an expired row is
+ * already unreachable, revoked or not. It was never deleted, though: the live
+ * table was 22 rows, 22 of them expired, and it had never been autovacuumed.
+ * Login is where this runs: the database is already open, the write is one
+ * indexed DELETE on a table this path keeps small, and nobody is waiting on a
+ * board to refresh. Failure is deliberately silent — cleanup must never turn a
+ * successful sign-in into an error page.
+ */
+async function pruneDeadSessions(): Promise<void> {
+  try {
+    await query("DELETE FROM app_sessions WHERE expires_at < now()");
+  } catch {
+    // The next sign-in tries again; a full table is not worth a broken login.
+  }
 }
 
 export async function destroySession(userId?: string) {

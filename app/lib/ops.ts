@@ -18,7 +18,15 @@ import { toIst } from "./format";
 export const RETENTION_KEY = "retention";
 export const RETENTION_MIN = 1;
 export const RETENTION_MAX = 30;
-export const RETENTION_DEFAULT = 7;
+/** Three days, because this product trades intraday: every read of `candles_1m`
+ *  is either the newest session (Board, Watchlist, /strategy ORB, intraday
+ *  sparklines) or the newest ~400 bars of one instrument, and the worker's
+ *  warm-up needs `max(slow_ema_period, volume_lookback)` completed candles — one
+ *  session holds 345 of them. Days 2 and 3 are the slack for a restart on a
+ *  Monday and for the broker's historical fallback, not a window anything
+ *  renders. `candles_1d`/`candles_1w` are outside the purge by design (§0008)
+ *  and are bounded separately. */
+export const RETENTION_DEFAULT = 3;
 
 export type RetentionState = {
   days: number;
