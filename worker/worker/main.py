@@ -160,6 +160,7 @@ class WorkerRuntime:
                 if code:
                     return code
                 if not self.stop.is_set():
+                    await self._idle_maintenance()
                     await self._wait_for_next_session()
         finally:
             await self._teardown_day()
@@ -184,7 +185,6 @@ class WorkerRuntime:
         window = self.calendar.session(moment.date())
         if phase == SessionPhase.POST_CLOSE:
             log.info("session_already_closed", trading_date=moment.date().isoformat())
-            await self._purge_old_data()  # the market is asleep; this is the window for it
             return 0
         if window is None:
             log.info(
@@ -192,7 +192,6 @@ class WorkerRuntime:
                 trading_date=moment.date().isoformat(),
                 next_trading_day=self.calendar.next_trading_day(moment.date()).isoformat(),
             )
-            await self._purge_old_data()  # candles age on holidays too
             return 0
         if phase in (SessionPhase.CLOSED, SessionPhase.PRE_OPEN):
             existing = await self.store.get_session_for_date(window.trading_date)
@@ -740,6 +739,20 @@ class WorkerRuntime:
             except Exception as exc:  # noqa: BLE001
                 self.last_error = f"reauth: {type(exc).__name__}"[:200]
                 log.warning("reauth_failed", error=scrub(str(exc)))
+
+    async def _idle_maintenance(self) -> None:
+        """Age the hot tables while the market sleeps.
+
+        `_run_today` returns 0 on every path that does not run a session — the
+        evening after a finalized day, a holiday, a weekend — and this is the
+        one hook all of them share. A process that boots at 22:00 therefore
+        purges at 22:00, and a process that has been parked since this morning's
+        close finds nothing left to delete: `_purge_old_data` logs only when a
+        DELETE actually removed rows.
+        """
+        if self._market_is_live(now_ist()):
+            return
+        await self._purge_old_data()
 
     async def _retention_days(self) -> int:
         """The ageing window: the dashboard's saved value, or the env default.
