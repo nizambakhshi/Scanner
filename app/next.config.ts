@@ -36,6 +36,20 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  // `next dev` will not serve its own JS chunks to a Host it does not recognise,
+  // and a tunnelled hostname is exactly that. The response is a bare 401, so the
+  // page still renders from the server — but React never hydrates, the login
+  // form's onSubmit handler never attaches, and the browser falls back to a native
+  // GET submit that puts the typed credentials in the URL, the history and the dev
+  // log. Listing the origin here is the only way to run the dev server behind a
+  // tunnel; a production build (`start:staging`) does not need it.
+  //
+  // Env-driven rather than hardcoded: this file is shared with the deployed copy,
+  // and an empty list leaves Next's default (block everything but localhost).
+  allowedDevOrigins: (process.env.DEV_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter((origin) => origin !== ""),
   // Keep the Postgres driver out of the server bundle. Bundled, its socket and
   // timer handling loses to the sandboxed globals (a stalled pooled connection
   // then never surfaces as an error — reads into it simply hang until the app's
