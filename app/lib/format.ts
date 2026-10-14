@@ -126,16 +126,44 @@ export function strings(value: unknown): string[] {
   return [];
 }
 
-export function jsonRecord(value: unknown): Record<string, unknown> {
-  if (value && typeof value === "object") return value as Record<string, unknown>;
-  if (typeof value === "string") {
-    try {
-      return JSON.parse(value) as Record<string, unknown>;
-    } catch {
-      return {};
-    }
+/**
+ * The plain-object form of a stored `jsonb` value, or `null` when there isn't one.
+ *
+ * The string branch is not defensive padding for a hypothetical: this app's own
+ * writers produced it. `postgres.js` binds a parameter as a *value*, so
+ * `INSERT … VALUES ($1::jsonb)` handed a **pre-stringified** document stores a jsonb
+ * *string* whose text happens to be JSON — `"{\"days\":3}"` — rather than the object
+ * the cast asks for. Verified 2026-10-15 against a fresh disposable database and
+ * against Supabase Mumbai, where `ops_settings['retention']` has held that shape since
+ * the page wrote it. It matters because both readers used to require an object: the
+ * dashboard displayed its default, and the worker's `get_ops_setting()` returns `None`
+ * for a non-dict — so a row the page called *saved* was obeyed by nobody. The writers
+ * now pass objects (`lib/ops.ts`, `lib/alerts-store.ts`), and this reader understands
+ * the older shape so an existing row is honoured until its next save repairs it.
+ *
+ * Anything that is not a JSON object comes back `null` — including `"3"`, which parses
+ * but is not the shape any caller asked for.
+ */
+export function storedDocument(value: unknown): Record<string, unknown> | null {
+  if (isRecord(value)) return value;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    const decoded: unknown = JSON.parse(trimmed);
+    return isRecord(decoded) ? decoded : null;
+  } catch {
+    return null;
   }
-  return {};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** `storedDocument` with the empty object callers that only render, and never branch, would want. */
+export function jsonRecord(value: unknown): Record<string, unknown> {
+  return storedDocument(value) ?? {};
 }
 
 // ── money / metrics ───────────────────────────────────────────────────────────

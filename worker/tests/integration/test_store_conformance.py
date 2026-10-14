@@ -622,3 +622,35 @@ async def test_jsonb_columns_round_trip_dicts_and_lists(
         BASE_DATE,
         {"qualified_count": 2, "final_watchlist": []},
     )
+
+
+async def test_ops_setting_decodes_whatever_shape_the_column_holds(store: Any) -> None:
+    """`get_ops_setting` reads the row the dashboard actually wrote, in either shape.
+
+    An earlier build of the page passed ``JSON.stringify(doc)`` to ``$n::jsonb``, so
+    the column held a jsonb *string* — ``"{\\"days\\": 3}"`` — rather than an object.
+    Every caller treats ``None`` as "the settings page never touched this" and falls
+    back to its environment, which made that row a knob that moved on screen and did
+    nothing in the process. It reached production unnoticed, so the reader decodes
+    the string instead of reporting the row absent, and this test pins all three
+    shapes the column can hold: object, double-encoded string, and a scalar that is
+    not a document at all.
+    """
+    if isinstance(store, InMemoryStore):
+        pytest.skip("these are shapes a jsonb column can hold; a Python dict is not one")
+    rows = (
+        ("alert_strategies", '{"version": 1, "strategies": {}}'),
+        ("retention", '"{\\"days\\": 3}"'),
+        ("theme", '"3"'),
+    )
+    async with store._pool.connection() as conn, conn.transaction():
+        for key, raw in rows:
+            await conn.execute(
+                "INSERT INTO ops_settings (key, value) VALUES (%s, %s::jsonb) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                (key, raw),
+            )
+    assert await store.get_ops_setting("alert_strategies") == {"version": 1, "strategies": {}}
+    assert await store.get_ops_setting("retention") == {"days": 3}, "double-encoded row must still be obeyed"
+    assert await store.get_ops_setting("theme") is None, "a scalar is not a document"
+    assert await store.get_ops_setting("absent") is None

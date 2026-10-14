@@ -21,6 +21,7 @@ structlog pipeline redacts them.
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -1692,15 +1693,31 @@ class PostgresStore(ScannerStore):
         return deleted
 
     async def get_ops_setting(self, key: str) -> dict[str, object] | None:
+        """One ``ops_settings`` document, as the dict every caller expects.
+
+        A row stored as a jsonb *string* is decoded rather than reported absent.
+        That shape is not hypothetical: the dashboard's ``INSERT … $n::jsonb`` with a
+        pre-stringified payload produced it, and Supabase's ``retention`` row held it
+        until this was fixed on both sides. Returning ``None`` for it would be the
+        quieter, worse failure — every reader treats ``None`` as "the page never
+        touched this", so a knob the operator moved would be silently ignored while
+        the dashboard displayed the new value.
+        """
         async with self._pool.connection() as conn, conn.transaction():
             row = await (
                 await conn.execute(
                     "SELECT value FROM ops_settings WHERE key = %s", (key,)
                 )
             ).fetchone()
-        if row is None or not isinstance(row["value"], dict):
+        value: object = row["value"] if row is not None else None
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(value, dict):
             return None
-        return dict(row["value"])
+        return dict(value)
 
     # ── test helper ─────────────────────────────────────────────────────────
     async def truncate_all(self, *, allow: bool = False) -> None:
