@@ -1399,8 +1399,13 @@ class PostgresStore(ScannerStore):
         signal_type: str,
         *,
         since: datetime,
+        reason: str | None = None,
     ) -> datetime | None:
         statuses = [status.value for status in ALERTED_DELIVERY_STATUSES]
+        # The reasons filter is a separate predicate rather than an f-string
+        # fragment so the parameter stays bound: `%(reason)s IS NULL` short-circuits
+        # for every non-breakout alert, and the array containment only runs when a
+        # strategy discriminator was supplied.
         sql = """
             SELECT MAX(s.event_timestamp) AS at
             FROM signals s
@@ -1409,12 +1414,14 @@ class PostgresStore(ScannerStore):
               AND s.signal_type = %(signal_type)s
               AND s.event_timestamp >= %(since)s
               AND d.delivery_status = ANY(%(statuses)s)
+              AND (%(reason)s::text IS NULL OR s.reasons @> ARRAY[%(reason)s]::text[])
         """
         params = {
             "instrument_id": instrument_id,
             "signal_type": signal_type,
             "since": since,
             "statuses": statuses,
+            "reason": reason,
         }
         async with self._pool.connection() as conn, conn.transaction():
             row = await (await conn.execute(sql, params)).fetchone()

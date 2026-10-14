@@ -12,6 +12,7 @@ import pytest
 
 from tests.conftest import BASE_DAY, minute
 from worker.alerts import AlertEngine, episode_id_for, format_message, idempotency_key
+from worker.analytics.breakouts import BreakoutEvent
 from worker.config import ScannerParams
 from worker.models import (
     Channel,
@@ -414,3 +415,147 @@ async def test_zero_cooldown_disables_suppression(store):
     assert first.suppressed_reason is None
     assert second.suppressed_reason is None
     assert len(telegram_rows(store)) == 2
+
+
+# ── level breaks: raise_breakout (operator feature 2026-10-14) ───────────────
+
+
+def event(**overrides: Any) -> BreakoutEvent:
+    """A detector event as the tracker would hand it over.
+
+    Defaults are a day-high break on RELIANCE at 100.5 over a 100.0 level.
+    """
+    base: dict[str, Any] = {
+        "strategy": "session_break",
+        "direction": "UP",
+        "instrument_id": 1,
+        "symbol": "RELIANCE",
+        "level": 100.0,
+        "price": 100.5,
+        "candle_start": minute(0),
+        "trading_date": BASE_DAY,
+        "volume_ratio": 1.8,
+        "cooldown_minutes": 15,
+        "telegram": True,
+        "reasons": ("strategy:session_break", "day_high_break", "volume_1.80x"),
+    }
+    base.update(overrides)
+    return BreakoutEvent(**base)
+
+
+def as_orb(**overrides: Any) -> BreakoutEvent:
+    base: dict[str, Any] = {
+        "strategy": "orb",
+        "level": 99.0,
+        "price": 100.5,
+        "cooldown_minutes": 0,
+        "reasons": ("strategy:orb", "orb_high_break", "volume_2.10x"),
+    }
+    base.update(overrides)
+    return event(**base)
+
+
+async def test_raise_breakout_writes_the_direction_type_and_the_strategy_reason(alerts, store):
+    # Two signal types carry three strategies: the direction is what the alert *is*,
+    # the strategy is data, and the strategy has to survive in a column.
+    up = await alerts.raise_breakout(event(), session_id=1, previous_close=100.0)
+    down = await alerts.raise_breakout(
+        event(direction="DOWN", level=98.0, price=97.5,
+              reasons=("strategy:session_break", "day_low_break")),
+        session_id=1,
+        previous_close=100.0,
+    )
+    assert up.signal.signal_type is SignalType.BREAKOUT_UP
+    assert down.signal.signal_type is SignalType.BREAKDOWN
+    assert up.signal.reasons[0] == "strategy:session_break"
+    assert "broke the day high" in (up.signal.message or "")
+    assert "broke the day low" in (down.signal.message or "")
+    assert up.signal.intraday_change_pct == pytest.approx(0.5, abs=1e-9)
+    assert up.signal.price == 100.5 and up.signal.relative_volume == 1.8
+    assert up.signal.candle_start == minute(0)
+    assert telegram_rows(store) and dashboard_rows(store)
+
+
+async def test_only_the_vwap_strategy_puts_its_level_in_the_vwap_column(alerts):
+    # A day break's level is a price the stock had already traded at, not the session
+    # VWAP. Writing it into the vwap column would draw a line the chart never printed.
+    day = await alerts.raise_breakout(event(), session_id=1)
+    reclaim = await alerts.raise_breakout(
+        as_orb(strategy="vwap", level=100.2,
+               reasons=("strategy:vwap", "vwap_reclaim", "volume_1.80x")),
+        session_id=1,
+    )
+    assert day.signal.vwap is None
+    assert reclaim.signal.vwap == 100.2
+
+
+async def test_the_same_level_never_alerts_twice_even_from_another_process(alerts, store):
+    # Restart replay: the detector re-derives the same event, the level-keyed episode
+    # id makes the idempotency key identical, and the row is the database's to refuse.
+    first = await alerts.raise_breakout(event(), session_id=1)
+    replay = await alerts.raise_breakout(event(), session_id=1)
+    assert first.created is True
+    assert replay.created is False and replay.duplicate is True
+    assert replay.suppressed_reason == "duplicate"
+    assert len(store.signals) == 1, "the replay must not queue a second delivery either"
+
+
+async def test_a_higher_level_is_a_new_leg_and_the_cooldown_window_decides_its_timing(
+    alerts, store
+):
+    # The day break re-arms after a pullback, so a second break of a *higher* high is
+    # new news: a different episode id, so the database does not swallow it — and the
+    # strategy's own window is what keeps a grinding tape from paging every minute.
+    first = await alerts.raise_breakout(event(), session_id=1)
+    within = await alerts.raise_breakout(event(level=101.0, candle_start=minute(5)), session_id=1)
+    after = await alerts.raise_breakout(event(level=102.0, candle_start=minute(30)), session_id=1)
+    assert first.created and within.created and after.created
+    assert first.suppressed_reason is None
+    assert within.suppressed_reason == "cooldown 15m", "window in force, board row kept"
+    assert after.suppressed_reason is None, "30 minutes later the window has passed"
+    assert len(store.signals) == 3
+    assert len(telegram_rows(store)) == 2, "the suppressed leg pages nobody"
+
+
+async def test_each_strategy_keeps_its_own_cooldown_window(alerts, store):
+    # Three strategies share BREAKOUT_UP. An ORB break at the same minute as a day
+    # high must not be muted by it — and ORB's own window is 0 because its level is
+    # fixed for the day, so a second bucket crossing is impossible anyway.
+    day = await alerts.raise_breakout(event(), session_id=1)
+    orb = await alerts.raise_breakout(as_orb(candle_start=minute(1)), session_id=1)
+    assert day.created and orb.created
+    assert day.suppressed_reason is None and orb.suppressed_reason is None, (
+        "the strategy discriminator in reasons is what keeps these independent"
+    )
+    # ...while a second day break 1 minute later is muted by the day break's window.
+    again = await alerts.raise_breakout(
+        event(level=101.0, candle_start=minute(2)), session_id=1
+    )
+    assert again.created is True and again.suppressed_reason == "cooldown 15m"
+    assert len(store.signals) == 3
+
+
+async def test_telegram_false_records_the_alert_without_paging_anybody(alerts, store):
+    # The operator's per-strategy switch: the board still shows the break, the phone
+    # does not ring. This is the delivery decision, not a detection one.
+    quiet = await alerts.raise_breakout(event(telegram=False), session_id=1)
+    loud = await alerts.raise_breakout(as_orb(candle_start=minute(1)), session_id=1)
+    assert quiet.created is True and loud.created is True
+    quiet_channels = {d.channel for d in store.deliveries.values() if d.signal_id == quiet.signal.id}
+    loud_channels = {d.channel for d in store.deliveries.values() if d.signal_id == loud.signal.id}
+    assert quiet_channels == {Channel.DASHBOARD}
+    assert loud_channels == {Channel.DASHBOARD, Channel.TELEGRAM}
+
+
+async def test_a_breakout_is_suppressed_by_cooldown_only_after_a_pushed_alert(store):
+    # Cooldown counts *delivered* alerts. With Telegram off, only the dashboard row
+    # exists — and DASHBOARD/DELIVERED is in the alerted set, so the window still
+    # applies; a SUPPRESSED row must not push the window forward forever.
+    alerts = engine_for(store, ScannerParams(), telegram_enabled=False)
+    first = await alerts.raise_breakout(event(), session_id=1)
+    second = await alerts.raise_breakout(event(level=101.0, candle_start=minute(3)), session_id=1)
+    third = await alerts.raise_breakout(event(level=102.0, candle_start=minute(6)), session_id=1)
+    assert first.suppressed_reason is None
+    assert second.suppressed_reason == "cooldown 15m"
+    assert third.suppressed_reason == "cooldown 15m", "the window does not extend itself"
+    assert all(d.delivery_status is DeliveryStatus.SUPPRESSED for d in dashboard_rows(store)[1:])

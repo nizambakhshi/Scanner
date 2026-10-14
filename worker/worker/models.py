@@ -89,6 +89,13 @@ class SignalType(StrEnum):
     # the pair *changes* state, never repeatedly for a standing state.
     RSI_BULLISH = "RSI_BULLISH"
     RSI_BEARISH = "RSI_BEARISH"
+    # Level breaks (operator feature 2026-10-14). Two types, not six: the
+    # direction is what an alert *is* (up over a level / down under one), while
+    # the strategy that saw it — day break, opening range, VWAP — is data, so it
+    # travels in ``reasons[0]`` as ``strategy:<name>`` and is what the per-strategy
+    # cooldown keys on. See ``worker/analytics/breakouts.py``.
+    BREAKOUT_UP = "BREAKOUT_UP"
+    BREAKDOWN = "BREAKDOWN"
 
 
 class DeliveryStatus(StrEnum):

@@ -15,16 +15,21 @@ every episode raised during a run produces its queued delivery row; the
 default 15-minute window semantics (first push through, repeats suppressed)
 are pinned in tests/unit/test_alerts.py and
 tests/unit/test_dispatcher.py.
+
+The level-break detectors (day high / ORB / VWAP) are muted for every session
+here — see :func:`build`. Armed behaviour is :mod:`tests.e2e.test_breakout_session`.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import time, timedelta
 
 import pytest
 
 from tests.conftest import BASE_DAY, SESSION_CLOSE, SESSION_OPEN, minute, tick
 from worker.alerts import AlertEngine
+from worker.analytics.breakouts import DEFAULTS, STRATEGIES, StrategiesConfig
 from worker.analytics.indicators import IndicatorRegistry
 from worker.analytics.scanner import F_INSUFFICIENT_HISTORY
 from worker.config import ScannerParams
@@ -60,6 +65,17 @@ CALENDAR = TradingCalendar(
     stale=False,
 )
 WINDOW = CALENDAR.session(BASE_DAY)
+
+
+def all_strategies_muted() -> StrategiesConfig:
+    """Every level-break detector switched off, thresholds left at their defaults.
+
+    Exported for :mod:`tests.e2e.test_breakout_session`, which builds the same
+    session with the detectors armed instead.
+    """
+    return StrategiesConfig(
+        **{key: replace(DEFAULTS[key], enabled=False) for key in STRATEGIES}
+    )
 
 
 def inst(iid: int = 1, symbol: str = "RELIANCE", previous_close: float = 100.0) -> Instrument:
@@ -165,9 +181,25 @@ async def build(
     simulation: bool = True,
     telegram: bool = False,
     cooldown: int = 0,
+    strategies: StrategiesConfig | None = None,
+    store: InMemoryStore | None = None,
 ) -> Session:
-    store = InMemoryStore()
+    """One synthetic trading day.
+
+    ``strategies=None`` means every level-break detector is *muted* here, which is
+    not the shipped configuration (that arms all three). This file's assertions are
+    hand-computed counts of watchlist signals and queued deliveries, and a breakout
+    row added to each tape would turn every one of them into arithmetic unrelated to
+    what the test pins. The detectors run armed in
+    :mod:`tests.e2e.test_breakout_session`.
+
+    ``store`` is passed in by a restart test that wants the second process to see
+    the candles the first one wrote.
+    """
     params = ScannerParams(alert_cooldown_minutes=cooldown)
+    armed = strategies if strategies is not None else all_strategies_muted()
+    if store is None:
+        store = InMemoryStore()
     await store.upsert_instruments(instruments)
     session = await store.ensure_session(BASE_DAY, SESSION_OPEN, SESSION_CLOSE)
     await store.set_session_status(session.id, "IN_PROGRESS")
@@ -198,6 +230,7 @@ async def build(
         watchlist=WatchlistManager(store=store, params=params, alerts=alerts, simulation=simulation),
         alerts=alerts,
         is_simulated=simulation,
+        strategies=armed,
     )
     return Session(pipeline, session, plans)
 

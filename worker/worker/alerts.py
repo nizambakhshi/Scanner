@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
 
+from .analytics.breakouts import BreakoutEvent
 from .config import ScannerParams
 from .logging_setup import get_logger
 from .models import (
@@ -56,12 +57,23 @@ PUSHED_SIGNAL_TYPES = {
     # drumbeat the way an every-candle rule would.
     SignalType.RSI_BULLISH,
     SignalType.RSI_BEARISH,
+    # Level breaks (operator feature 2026-10-14). This set says the *type* is
+    # pushable; whether a given strategy pages the phone is decided per event from
+    # ``ops_settings['alert_strategies']`` — see :meth:`AlertEngine.raise_breakout`.
+    SignalType.BREAKOUT_UP,
+    SignalType.BREAKDOWN,
 }
 
 COOLDOWN_APPLIED = {
     SignalType.BULLISH_ENTRY,
     SignalType.WATCHLIST_ADDED,
     SignalType.WATCHLIST_REQUALIFIED,
+    # Each strategy brings its own window (``StrategyParams.cooldown_minutes``) and
+    # its own discriminator (``strategy:<name>`` in ``reasons``), because three
+    # strategies share these two signal types: an opening-range break must not be
+    # muted by a VWAP loss raised in the same minute on the same stock.
+    SignalType.BREAKOUT_UP,
+    SignalType.BREAKDOWN,
 }
 
 
@@ -160,6 +172,8 @@ def _emoji(kind: SignalType) -> str:
         SignalType.DAILY_SCAN_COMPLETE: "📊",
         SignalType.RSI_BULLISH: "📈",
         SignalType.RSI_BEARISH: "📉",
+        SignalType.BREAKOUT_UP: "🔼",
+        SignalType.BREAKDOWN: "🔽",
     }.get(kind, "ℹ️")
 
 
@@ -226,7 +240,16 @@ class AlertEngine:
         exchange: str = "NSE",
         previous_close: float | None = None,
         config_version: int | None = None,
+        cooldown_minutes: int | None = None,
+        telegram: bool = True,
     ) -> AlertOutcome:
+        """Persist one alert and queue its deliveries.
+
+        ``cooldown_minutes`` overrides :attr:`ScannerParams.alert_cooldown_minutes`
+        for a strategy that carries its own window; ``telegram=False`` records the
+        alert — the board still shows it — without paging the phone. Both default to
+        the global behaviour, so every existing caller is unchanged.
+        """
         signal = Signal(
             instrument_id=instrument_id,
             trading_session_id=session_id,
@@ -262,8 +285,14 @@ class AlertEngine:
         # be read before this signal is written: once the row is in the table the
         # query can return this signal itself, the gap looks like 0 seconds, and
         # every alert is suppressed as a cooldown duplicate.
+        #
+        # ``cooldown_minutes`` lets a caller use its own window — the breakout
+        # strategies each carry one — while the ``strategy:<name>`` reason inside
+        # ``reasons`` narrows the comparison to the same strategy. Both default to
+        # the global behaviour, so every existing alert path is unchanged.
+        window = self.params.alert_cooldown_minutes if cooldown_minutes is None else cooldown_minutes
         cooled = signal.signal_type in COOLDOWN_APPLIED and await self._in_cooldown(
-            signal, event_timestamp
+            signal, event_timestamp, minutes=window
         )
 
         inserted: SignalInsertResult = await self.store.insert_signal(signal)
@@ -290,7 +319,7 @@ class AlertEngine:
             return outcome
 
         if cooled:
-            outcome.suppressed_reason = f"cooldown {self.params.alert_cooldown_minutes}m"
+            outcome.suppressed_reason = f"cooldown {window}m"
             outcome.delivery_ids = await self._queue(stored, Channel.DASHBOARD, DeliveryStatus.SUPPRESSED)
             outcome.delivery_channels = (Channel.DASHBOARD,)
             log.info("signal_cooldown_suppressed", symbol=stored.symbol, type=stored.signal_type.value)
@@ -299,7 +328,10 @@ class AlertEngine:
         channels: list[Channel] = [Channel.DASHBOARD]
         ids: list[int] = []
         ids.extend(await self._queue(stored, Channel.DASHBOARD, DeliveryStatus.DELIVERED))
-        if self.telegram_enabled and signal_type in PUSHED_SIGNAL_TYPES:
+        # ``telegram`` is the per-strategy switch the operator sets on /alerts: a
+        # row is still written and still shows on the board, it just never pages
+        # the phone. The global enable has to agree, too.
+        if self.telegram_enabled and telegram and signal_type in PUSHED_SIGNAL_TYPES:
             channels.append(Channel.TELEGRAM)
             ids.extend(await self._queue(stored, Channel.TELEGRAM, DeliveryStatus.QUEUED))
         outcome.delivery_channels = tuple(channels)
@@ -330,24 +362,76 @@ class AlertEngine:
             message=f"Feed restored after {quiet_seconds:.0f}s of silence.",
         )
 
+    async def raise_breakout(
+        self,
+        event: BreakoutEvent,
+        *,
+        session_id: int,
+        company_name: str | None = None,
+        previous_close: float | None = None,
+    ) -> AlertOutcome:
+        """Turn one detector event into an alert.
+
+        The three level-break strategies share two signal types — the direction is
+        what the alert *is*, the strategy is metadata — so the dedupe that keeps a
+        grinding tape from paging once per new high is the event's own level-keyed
+        :attr:`~worker.analytics.breakouts.BreakoutEvent.episode_id`, and the
+        strategy name inside ``reasons`` is what keeps each strategy's cooldown
+        separate. Both are decided in the detector, not here; this method only
+        carries them into the database unchanged.
+        """
+        change = (
+            None
+            if not previous_close
+            else (event.price / previous_close - 1.0) * 100.0
+        )
+        return await self.raise_alert(
+            signal_type=SignalType.BREAKOUT_UP if event.is_up else SignalType.BREAKDOWN,
+            instrument_id=event.instrument_id,
+            session_id=session_id,
+            event_timestamp=event.candle_start,
+            episode_id=event.episode_id,
+            candle_start=event.candle_start,
+            price=event.price,
+            # The level is only the session VWAP for that one strategy; storing it
+            # in the vwap column of a day-break row would make the chart lie.
+            vwap=event.level if event.strategy == "vwap" else None,
+            relative_volume=event.volume_ratio,
+            intraday_change_pct=change,
+            reasons=event.reasons,
+            message=event.describe(),
+            symbol=event.symbol,
+            company_name=company_name,
+            previous_close=previous_close,
+            cooldown_minutes=event.cooldown_minutes,
+            telegram=event.telegram,
+        )
+
     # ── internals ─────────────────────────────────────────────────────────
 
-    async def _in_cooldown(self, signal: Signal, now: datetime) -> bool:
+    async def _in_cooldown(self, signal: Signal, now: datetime, *, minutes: int) -> bool:
         """Has this (instrument, type) already produced an alert inside the window?
 
         Deliberately keyed on delivered alerts rather than on signal rows: a
         qualifying instrument emits a signal every minute, so counting suppressed
         rows would push the window forward forever and the second alert of the day
         would never happen.
+
+        For level breaks the window is the strategy's own, and the match is narrowed
+        to the same strategy: ``BREAKOUT_UP`` from the opening range and ``BREAKOUT_UP``
+        from a VWAP reclaim are different pieces of news even when the stock, the
+        minute and the signal type match. The discriminator lives in ``reasons``
+        because that is the only column the row has for it.
         """
-        minutes = self.params.alert_cooldown_minutes
         if minutes <= 0 or signal.instrument_id is None:
             return False
+        reason = next((code for code in signal.reasons if code.startswith("strategy:")), None)
         since = now - timedelta(minutes=minutes)
         last = await self.store.last_pushed_signal_at(
             signal.instrument_id,
             signal.signal_type.value,
             since=since,
+            reason=reason,
         )
         if last is None:
             return False

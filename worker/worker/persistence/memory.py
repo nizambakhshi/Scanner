@@ -550,7 +550,12 @@ class InMemoryStore(ScannerStore):
         return SignalInsertResult(signal_id=new_id, created=True)
 
     async def last_pushed_signal_at(
-        self, instrument_id: int, signal_type: str, *, since: datetime
+        self,
+        instrument_id: int,
+        signal_type: str,
+        *,
+        since: datetime,
+        reason: str | None = None,
     ) -> datetime | None:
         pushed_signal_ids = {
             delivery.signal_id
@@ -564,6 +569,9 @@ class InMemoryStore(ScannerStore):
             and row.instrument_id == instrument_id
             and row.signal_type.value == signal_type
             and row.event_timestamp >= since
+            # Mirrors the SQL containment check, so a cooldown test that passes
+            # against the in-memory store means the same thing against Postgres.
+            and (reason is None or reason in row.reasons)
         ]
         return max(stamps) if stamps else None
 
