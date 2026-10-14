@@ -1,4 +1,5 @@
 import type { RsiBias, SignalType, WatchlistState } from "@/lib/types";
+import { strategyLabel } from "@/lib/alert-strategies";
 import { humanise } from "@/lib/format";
 
 const STATE_STYLES: Record<WatchlistState, string> = {
@@ -37,11 +38,37 @@ const SIGNAL_STYLES: Partial<Record<SignalType, string>> = {
   DATA_FEED_RECOVERED: "border-positive/40 bg-positive/10 text-positive",
   RSI_BULLISH: "border-positive/40 bg-positive/10 text-positive",
   RSI_BEARISH: "border-negative/40 bg-negative/10 text-negative",
+  BREAKOUT_UP: "border-positive/40 bg-positive/10 text-positive",
+  BREAKDOWN: "border-negative/40 bg-negative/10 text-negative",
 };
 
 export function SignalBadge({ type }: { type: SignalType }) {
   const style = SIGNAL_STYLES[type] ?? "border-line-2 bg-surface-2 text-ink-2";
   return <span className={`chip ${style}`}>{humanise(type)}</span>;
+}
+
+/**
+ * Which of the three level detectors raised this row.
+ *
+ * The discriminator is `strategy:<name>`, first in `reasons`, because that is the
+ * only column a signal row has for it: `BREAKOUT_UP` from the opening range and
+ * `BREAKOUT_UP` from a VWAP reclaim are different news even when the stock, the
+ * minute and the type match. Without this chip the feed would claim two alerts were
+ * the same event.
+ */
+export function StrategyChip({ reasons }: { reasons: string[] }) {
+  const code = reasons.find((reason) => reason.startsWith("strategy:"));
+  if (!code) return null;
+  const key = code.slice("strategy:".length);
+  const label = strategyLabel(key) ?? humanise(key);
+  return (
+    <span
+      title={`Raised by the ${label} rule on /alerts`}
+      className="font-display text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-2"
+    >
+      {label}
+    </span>
+  );
 }
 
 const BIAS_STYLES: Record<NonNullable<RsiBias>, string> = {

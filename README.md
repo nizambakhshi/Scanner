@@ -6,9 +6,17 @@ operator about entries, weakenings and removals on Telegram and on a web dashboa
 
 **It never trades.** Nothing in this repository places, modifies or cancels an order.
 Broker credentials are used for one purpose: reading the live market-data stream. The
-dashboard is a reader of a database the scanner writes to; it holds no broker or
-messaging credentials at all, and its configuration module refuses to read variables
-whose names suggest they do.
+dashboard is a reader of a database the scanner writes to; it holds no broker
+credentials, and its configuration module refuses to read variables whose names suggest
+they do.
+
+Telegram is the one exception, added deliberately on 2026-10-14 at the operator's
+request: the [Alert rules](app/app/(shell)/alerts/page.tsx) page stores a bot token and
+chat id so a rule can be pointed at a phone from the browser instead of only from the
+worker's environment, and its *Send test* button is the only message the dashboard ever
+sends. That pair is write-only — the page never shows it back, and it appears in no HTML,
+log line, API response or audit row, only as a 12-character sha256 fingerprint. Real
+alerts are still raised, deduped, rate-limited and delivered by the worker.
 
 ## The two processes
 
@@ -16,12 +24,13 @@ whose names suggest they do.
 | --- | --- | --- |
 | Runs | on a machine that can hold broker keys | anywhere, including a hosting platform |
 | Does | subscribes to the SmartAPI WebSocket, builds 1-minute candles, computes VWAP/EMA/relative volume, qualifies symbols, maintains the watchlist state machine, raises alerts, delivers to Telegram | reads the database and renders the watchlist, alert feed, session history, configuration and health |
-| Writes | PostgreSQL (Supabase) | nothing |
-| Secrets it can read | `ANGEL_*`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | `DATABASE_URL`, `AUTH_SESSION_SECRET`, admin email + password hash |
+| Writes | PostgreSQL (Supabase) | two `ops_settings` rows — `alert_strategies` and `telegram` — plus their audit rows |
+| Secrets it can read | `ANGEL_*`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | `DATABASE_URL`, `AUTH_SESSION_SECRET`, admin email + password hash, and `TELEGRAM_*` only as the fallback when nothing is saved on the page |
 
-They communicate only through PostgreSQL. A dashboard that is compromised, cached or
-screenshot cannot place a trade or send a message, because it cannot reach either
-capability.
+They communicate through PostgreSQL. A dashboard that is compromised, cached or
+screenshotted cannot place a trade — it cannot reach the broker at all — and the one
+outbound message it can produce is the test a signed-in operator asked for, which says in
+its own text that it is a test.
 
 ## Two environments
 
@@ -35,7 +44,7 @@ session.
 | Git | branch `main`, pushed to GitHub | branch `staging`, kept local |
 | Dashboard | Vercel, plus `localhost:3000` as a mirror of it — both read **Supabase Mumbai** | `127.0.0.1:3100` — reads the **Mac Mini's own Postgres** on 54322 |
 | Worker | `worker/`, `WORKER_ID=worker-local` | `Scanner-staging/worker/`, `WORKER_ID=worker-staging` |
-| Telegram | delivered from this copy | `TELEGRAM_*` blank on purpose: this copy must not send a second copy of an alert |
+| Telegram | delivered from this copy | `TELEGRAM_*` blank on purpose: this copy must not send a second copy of an alert. A pair saved on the Alerts page lives in *that* environment's `ops_settings`, so staging's button uses the Mini's row and never the live one |
 
 The env files are gitignored, so each copy carries its own credentials and its own
 `DATABASE_URL`; everything about the split that *is* in the code is two npm scripts and
@@ -128,8 +137,11 @@ worker/              Python 3.12 package: ingestion, indicators, watchlist, aler
   worker/scripts/    migrate, sync-instruments, dashboard-fixture export
   worker/            pipeline, watchlist state machine, alerts, Telegram, dispatcher
   tests/             unit, e2e (offline) and integration (needs a test database)
-app/                 Next.js 16 dashboard: pages + read-only JSON API
-supabase/migrations/ 0001–0004: tables, roles and security, read views, seed config
+app/                 Next.js 16 dashboard: pages + a JSON API that reads the tape and
+                     writes only the operator's own settings (config, alert rules,
+                     Telegram pair, password, retention)
+supabase/migrations/ 0001–0010: tables, roles and security, read views, seed config,
+                     daily/weekly candles, alert strategies and Telegram settings
 data/                checked-in Nifty 500 universe and NSE holiday calendar
 docs/                research notes and the deployment guide
 ```

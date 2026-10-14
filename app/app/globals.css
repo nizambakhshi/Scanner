@@ -151,6 +151,20 @@ body {
     font-variant-numeric: tabular-nums;
     letter-spacing: -0.01em;
   }
+  /* A number set inside a sentence (/alerts). Chrome's spinner arrows are drawn
+     inside the box, so a 4ch field only ever showed ~2 characters of "0.35" and
+     the rule read as a typo. The arrows go, and the declared width becomes the
+     width of the digits rather than the digits minus the padding. */
+  .num-inline {
+    box-sizing: content-box;
+    appearance: textfield;
+    -moz-appearance: textfield;
+  }
+  .num-inline::-webkit-inner-spin-button,
+  .num-inline::-webkit-outer-spin-button {
+    appearance: none;
+    margin: 0;
+  }
   .card {
     @apply rounded-lg border border-line bg-surface;
   }

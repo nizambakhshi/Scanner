@@ -19,6 +19,8 @@ const TYPES: SignalType[] = [
   "DAILY_SCAN_COMPLETE",
   "RSI_BULLISH",
   "RSI_BEARISH",
+  "BREAKOUT_UP",
+  "BREAKDOWN",
 ];
 
 const LIMITS = [25, 50, 100, 250];

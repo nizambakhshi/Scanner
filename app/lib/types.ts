@@ -249,7 +249,11 @@ export type SignalType =
   | "DATA_FEED_RECOVERED"
   | "DAILY_SCAN_COMPLETE"
   | "RSI_BULLISH"
-  | "RSI_BEARISH";
+  | "RSI_BEARISH"
+  /** The two level-break types. Direction is the news; which strategy saw it is
+   *  carried in `reasons` as `strategy:<name>` — see /alerts. */
+  | "BREAKOUT_UP"
+  | "BREAKDOWN";
 
 export type SignalRow = {
   id: number;

@@ -149,8 +149,13 @@ export default async function ConfigPage() {
       <Panel title="What is not here" hint="and why">
         <ul className="grid gap-2 px-4 py-3 text-[12px] leading-snug text-ink-2 md:grid-cols-2">
           <li className="border-l-2 border-line-2 pl-3">
-            No broker or Telegram credentials. This app reads a database and authenticates its own operator; the keys
-            that log in to the exchange and send messages belong to the worker process and are never configured here.
+            No broker credentials. The keys that log in to the exchange belong to the worker process and are never
+            configured here. Telegram is the exception the operator asked for on{" "}
+            <Link href="/alerts" className="link">
+              Alert rules
+            </Link>
+            : the bot token and chat id live in the database, are write-only on that page, and decide where level-break
+            alerts are pushed.
           </li>
           <li className="border-l-2 border-line-2 pl-3">
             No mid-session override. A save writes a new versioned row that the worker reads when it opens its next
