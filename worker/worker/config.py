@@ -234,7 +234,7 @@ class AngelSettings:
     instrument_master_url: str = (
         "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
     )
-    historical_warmup_days: int = 5
+    historical_warmup_days: int = 3
 
     @property
     def can_login(self) -> bool:
@@ -323,7 +323,11 @@ class WorkerSettings:
     # finalized — retention bounds the hot tables, the warmup window feeds
     # them. Warmup days (AngelSettings) may not exceed this: fetching history
     # that the next purge immediately deletes is just broker API spend.
-    retention_days: int = 7
+    # This is only the fallback: the dashboard's `ops_settings['retention']`
+    # wins at purge time (see `_retention_days`), and one complete session
+    # (345 bars) already covers `warmup_candles_required`, so three days is a
+    # window with slack rather than a shortage waiting to happen.
+    retention_days: int = 3
     scanner: ScannerParams = field(default_factory=ScannerParams)
     angel: AngelSettings = field(default_factory=AngelSettings)
     telegram: TelegramSettings = field(default_factory=TelegramSettings)
@@ -396,7 +400,7 @@ def load_settings(
         local_ip=_get(raw, "ANGEL_LOCAL_IP"),
         mac_address=_get(raw, "ANGEL_MAC_ADDRESS"),
         instrument_master_url=_get(raw, "INSTRUMENT_MASTER_URL", AngelSettings.instrument_master_url),
-        historical_warmup_days=_int(raw, "HISTORICAL_WARMUP_DAYS", 5),
+        historical_warmup_days=_int(raw, "HISTORICAL_WARMUP_DAYS", 3),
     )
     if scan_mode == "live" and not angel.configured:
         missing.append("ANGEL_API_KEY + ANGEL_CLIENT_CODE + (ANGEL_PIN + ANGEL_TOTP_SECRET or ANGEL_REFRESH_TOKEN)")
@@ -430,7 +434,7 @@ def load_settings(
         worker_id=_get(raw, "WORKER_ID") or "worker-local",
         heartbeat_seconds=_int(raw, "WORKER_HEARTBEAT_SECONDS", 20),
         session_lease_seconds=_int(raw, "SESSION_LEASE_SECONDS", 300),
-        retention_days=_int(raw, "RETENTION_DAYS", 7),
+        retention_days=_int(raw, "RETENTION_DAYS", 3),
         scanner=scanner,
         angel=angel,
         telegram=telegram,
