@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The staging board's public door, run as a per-user job.
+
+     Installed by ops/staging-tunnel/staging-tunnel.sh install — do not copy this file
+     into ~/Library/LaunchAgents and load it by hand, because loading it is exactly the
+     step that puts a real, password-guarded dashboard on the internet, and the
+     installer refuses to do that until the gate has been confirmed.
+
+     What this job can reach: only what ~/.cloudflared/config.yml names — today that is
+     one hostname pointing at http://127.0.0.1:3100, plus a catch-all 404. It cannot
+     serve the Mini's Postgres (54322), the PgBouncer edge (6543), or any other port,
+     because a hostname that is not in that file falls through to the 404 rule.
+
+     Why a user agent rather than `cloudflared service install`: that command wants
+     root and runs the tunnel as a system daemon; the staging board does not need it.
+     Nothing here reads ~/Desktop, so macOS TCC is not in the way either — the binary
+     is in /opt/homebrew and the config in ~/.cloudflared. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.scanner.staging-tunnel</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/cloudflared</string>
+    <string>--config</string>
+    <string>/Users/mohdnizam/.cloudflared/config.yml</string>
+    <string>tunnel</string>
+    <string>run</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/mohdnizam/Library/Logs/scanner-staging-tunnel.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/mohdnizam/Library/Logs/scanner-staging-tunnel.log</string>
+</dict>
+</plist>

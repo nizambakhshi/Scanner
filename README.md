@@ -63,6 +63,14 @@ that writes — run `npm run which-db` inside a copy's `app/`. It prints the mas
 connection string, the TLS mode, and `inet_server_addr()` as reported by the server
 itself, which is the one field that cannot lie about which cluster answered.
 
+Staging can also be reached from outside the house, through a Cloudflare Tunnel that
+points at `127.0.0.1:3100` and nothing else: `ops/staging-tunnel/staging-tunnel.sh
+open|close|status`. It is **closed by default** and `open` refuses until staging signs
+people in with its own Keychain-held password rather than the production one
+(`set-staging-password.sh`) and a zone filter has been confirmed — see
+[`ops/staging-tunnel/README.md`](ops/staging-tunnel/README.md) for what that gate does
+and, importantly, what it does not.
+
 ## What "qualified" means
 
 A symbol joins the watchlist when, on a **completed** 1-minute candle:
