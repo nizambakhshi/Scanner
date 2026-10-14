@@ -65,9 +65,10 @@ itself, which is the one field that cannot lie about which cluster answered.
 
 Staging can also be reached from outside the house, through a Cloudflare Tunnel that
 points at `127.0.0.1:3100` and nothing else: `ops/staging-tunnel/staging-tunnel.sh
-open|close|status`. It is **closed by default** and `open` refuses until staging signs
-people in with its own Keychain-held password rather than the production one
-(`set-staging-password.sh`) and a zone filter has been confirmed — see
+open|close|status`, serving `https://scanner-staging.maktaba.co.in`. It is **open since
+2026-10-14**, behind a Cloudflare country filter and a staging-only Keychain password;
+`open` refuses to start unless both are in place (`set-staging-password.sh` and a
+confirmed zone rule), and `close` needs no confirmation. See
 [`ops/staging-tunnel/README.md`](ops/staging-tunnel/README.md) for what that gate does
 and, importantly, what it does not.
 

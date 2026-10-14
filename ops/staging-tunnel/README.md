@@ -9,18 +9,19 @@ The live board is not here. It stays on Vercel reading Supabase Mumbai. This pat
 ever points at the staging copy, and `staging-tunnel.sh` refuses to start if the ingress
 file names a database port.
 
-## The three files
+## The files
 
 | | |
 | --- | --- |
 | `~/.cloudflared/config.yml` | the ingress: one hostname → `http://127.0.0.1:3100`, then the mandatory `http_status:404` catch-all. A hostname that is not in this file cannot be served. |
 | `com.scanner.staging-tunnel.plist` | the launchd job, installed to `~/Library/LaunchAgents/` by `staging-tunnel.sh install`. KeepAlive, so a dropped tunnel reconnects. |
 | `staging-tunnel.sh` | `install` · `open` · `close` · `status` · `preflight` |
+| `check_http.sh` | asks ~50 machines around the world (and one in India) what this URL looks like to them |
 | `set-staging-password.sh` | gives staging its own sign-in credential, held in the Keychain |
 
-## Default state: closed
+## Opening and closing
 
-`staging-tunnel.sh open` runs a preflight and **refuses** unless:
+`open` runs a preflight and **refuses** unless:
 
 1. the ingress file is sane (exactly one hostname, a 404 catch-all, no database port),
 2. something answers on `127.0.0.1:3100`,
@@ -32,6 +33,10 @@ file names a database port.
 `--force` overrides 4 and shouts while doing it. `close` always works, needs no
 confirmation, and proves itself by re-probing the hostname (530 = Cloudflare has no
 tunnel to route to).
+
+**Current state: open** (since 2026-10-14 evening), with the country rule live and
+verified from both vantages below. `status` prints the launchd state, what the origin
+answers locally, and what the public hostname answers from this machine.
 
 ## Why the password had to be split first
 
@@ -78,9 +83,25 @@ Anyone working from outside India needs the rule widened or must sign in from ho
   and `app_users.last_login_at` moved.
 - The staging dashboard now binds `127.0.0.1:3100` (`dev:staging`/`start:staging` pass
   `-H 127.0.0.1`). Before that it answered on `*:3100`, i.e. every machine on the LAN.
-- Not yet verified: the WAF rule (needs the operator's Cloudflare session — the
-  dashboard refuses automated evaluation on that page), and therefore the tunnel has
-  never been left open.
+- **The country rule, proved while the door was still shut.** A request the WAF blocks
+  never reaches the tunnel, so with `cloudflared` stopped the two answers separate
+  cleanly: `check_http.sh` reported **403 on 46 of 46 answered foreign nodes** and
+  **530 on its one Indian node** — blocked abroad, merely un-served at home. That is the
+  only proof available before opening, and it shows the rule discriminates by country
+  rather than locking the operator out.
+- **After `open`**: the same probe read **200 from India, 403 from all 46 abroad nodes**,
+  with `cloudflared` under launchd (pid 58498, KeepAlive, never exited).
+- **A real sign-in through the proxy**: `POST /api/session` → 200, `Set-Cookie:
+  scanner_session=…; HttpOnly; SameSite=lax`, and that cookie then returned **200 on the
+  board and on `/api/health`** — cookies survive Cloudflare. Without it the board is
+  307→`/login` and `/api/health` is 401, so the tunnel did not weaken the app's own wall.
+- One gap worth naming: the staging cookie carries **no `Secure` flag**, because
+  `lib/auth/session.ts:106` sets `secure: env.nodeEnv === "production"` and staging runs
+  under `next dev`. Production on Vercel has `NODE_ENV=production`, so its cookie is
+  `Secure`; this board's is not. Cloudflare only serves this hostname over HTTPS, so
+  nothing is exposed in practice — but if staging ever runs `start:staging` the flag
+  appears, and until then the honest reading is that the tunnel's protection is the
+  country rule plus the password, not transport security.
 
 ## Related
 
