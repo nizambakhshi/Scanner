@@ -509,26 +509,44 @@ class WorkerRuntime:
                     self.telegram = replace(self.telegram, bot_token="", chat_id="")
                 self._telegram_source = "ops_settings"
             else:
-                # A half-filled row — a chat id with no token, or the reverse — is an
-                # incomplete save, not a credential source. The env stays in force and
-                # the page's own validation is what the operator has to satisfy.
-                log.warning(
-                    "telegram_row_incomplete",
-                    note="bot_token and chat_id must both be present; keeping the "
-                    "environment credentials",
-                    has_token=bool(token),
-                    has_chat_id=bool(chat_id),
-                )
-        elif self._telegram_source != "env":
+                # Two different states share this branch, and only one of them is a
+                # problem. A row with *one* value is a save that went off halfway —
+                # the operator must see it. A row with neither is the placeholder
+                # migration 0010 seeds, i.e. a database that has never been used by
+                # the page; this method runs every 60 s, so warning about that would
+                # print several hundred lines a day and bury the half-saved case.
+                if token or chat_id:
+                    log.warning(
+                        "telegram_row_incomplete",
+                        note="bot_token and chat_id must both be present; the "
+                        "environment credentials take over",
+                        has_token=bool(token),
+                        has_chat_id=bool(chat_id),
+                    )
+                self._release_saved_credentials()
+        else:
             # The row was deleted since the last read: the environment is the
             # credential source again rather than a stale copy of the old page.
-            self.telegram = self.settings.telegram
-            self._telegram_source = "env"
+            self._release_saved_credentials()
         summary["telegram"] = self._telegram_source
         summary["strategies"] = self._strategies_source
         summary["telegram_configured"] = self.telegram.configured
         self._apply_alert_settings()
         return summary
+
+    def _release_saved_credentials(self) -> None:
+        """Hand the credentials back to the environment.
+
+        A row without a complete pair — cleared with the page's *Clear stored*
+        button, deleted outright, or the empty placeholder migration 0010 seeds — is
+        not a credential source. It must also not leave this process holding the
+        token that row supplied a minute ago: a dashboard that stops showing a pair
+        while the worker keeps paging it is precisely the half-done state this
+        method exists to prevent, and it is why the deleted-row case and the
+        blanked-row case take the same exit.
+        """
+        self.telegram = self.settings.telegram
+        self._telegram_source = "env"
 
     def _apply_alert_settings(self) -> None:
         """Push whatever was just adopted into the live objects, without a restart.

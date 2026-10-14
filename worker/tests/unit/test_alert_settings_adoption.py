@@ -229,14 +229,67 @@ async def test_a_saved_token_switched_off_pages_nobody() -> None:
     assert rt._alerts is not None and rt._alerts.telegram_enabled is False
 
 
-async def test_a_half_filled_row_leaves_the_environment_in_charge() -> None:
+async def test_an_empty_placeholder_row_leaves_the_environment_in_charge(
+    caplog,
+) -> None:
+    """What migration 0010 seeds, read every 60 s, must not look like a fault.
+
+    The seeded row exists so /alerts has something to render before anyone saves.
+    It is not a half-finished save, and a warning printed once a minute would train
+    the operator to ignore the line they actually need.
+    """
     store = InMemoryStore()
-    store.ops_settings["telegram"] = {"version": 1, "enabled": True, "bot_token": "", "chat_id": ""}
+    store.ops_settings["telegram"] = {
+        "version": 1,
+        "enabled": False,
+        "bot_token": "",
+        "chat_id": "",
+    }
     rt = runtime(store, token=ENV_TOKEN, chat="-1ENV")
 
-    summary = await rt._adopt_alert_settings()
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        summary = await rt._adopt_alert_settings()
 
     assert rt.telegram.bot_token == ENV_TOKEN
+    assert summary["telegram"] == "env"
+    assert summary["telegram_configured"] is True, "the environment is a working pair"
+    assert "telegram_row_incomplete" not in caplog.text
+
+
+async def test_a_half_filled_row_says_so(caplog) -> None:
+    store = InMemoryStore()
+    store.ops_settings["telegram"] = {"enabled": True, "bot_token": SECRET, "chat_id": ""}
+    rt = runtime(store, token=ENV_TOKEN, chat="-1ENV")
+
+    with caplog.at_level("INFO"):
+        summary = await rt._adopt_alert_settings()
+
+    assert summary["telegram"] == "env"
+    assert "telegram_row_incomplete" in caplog.text
+
+
+async def test_clearing_the_stored_pair_stops_the_worker_using_it() -> None:
+    """*Clear stored* on the page must reach the process, not only the page.
+
+    The row is re-read every minute, so a token that was adopted and then blanked
+    has to be given back. A worker that keeps paging a credential the operator
+    deleted is the failure this transition exists to close, and it is the same exit
+    the deleted row takes.
+    """
+    store = InMemoryStore()
+    store.ops_settings["telegram"] = {"enabled": True, "bot_token": SECRET, "chat_id": CHAT}
+    rt = runtime(store, token=ENV_TOKEN, chat="-1ENV")
+    await build_session(rt, store)
+    await rt._adopt_alert_settings()
+    assert rt.telegram.bot_token == SECRET
+    assert rt._sender is not None and rt._sender.settings.bot_token == SECRET
+
+    store.ops_settings["telegram"] = {"enabled": True, "bot_token": "", "chat_id": ""}
+    summary = await rt._adopt_alert_settings()
+
+    assert rt.telegram.bot_token == ENV_TOKEN, "a cleared row is not a stale credential"
+    assert rt._sender.settings.bot_token == ENV_TOKEN
     assert summary["telegram"] == "env"
 
 
