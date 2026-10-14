@@ -1047,23 +1047,46 @@ class PostgresStore(ScannerStore):
     async def load_completed_candles(
         self, instrument_ids: list[int], *, until: datetime, limit_per_instrument: int
     ) -> dict[int, list[Candle]]:
-        """One windowed query for ALL instruments — never N round-trips."""
+        """One round trip for ALL instruments — never N of them.
+
+        ``CROSS JOIN LATERAL`` over the instrument list, each leg being an
+        indexed backwards walk of ``candles_1m_instrument_minute_key``
+        (instrument_id, candle_start_at) that stops at ``limit_per_instrument``
+        rows. The window-function form this replaces ranked every stored minute
+        of every instrument before discarding all but the tail (986 ms for a
+        212-instrument warm-up on the live pooler, §0009); the walk touches only
+        the ~40 rows per instrument the warm-up actually seeds with. Listing the
+        columns rather than ``c.*`` keeps the read off the row's dead weight.
+        """
         out: dict[int, list[Candle]] = {instrument_id: [] for instrument_id in instrument_ids}
         if not instrument_ids:
             return out
         sql = """
-            SELECT * FROM (
-                SELECT
-                    c.*,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY c.instrument_id ORDER BY c.candle_start_at DESC
-                    ) AS rn
+            SELECT recent.instrument_id,
+                   recent.trading_date,
+                   recent.candle_start_at,
+                   recent."open",
+                   recent."high",
+                   recent."low",
+                   recent."close",
+                   recent.volume,
+                   recent.is_complete,
+                   recent.data_quality_status,
+                   recent.source_timestamp,
+                   recent.tick_count,
+                   recent.is_simulated
+            FROM unnest(%(ids)s::bigint[]) AS wanted(instrument_id)
+            CROSS JOIN LATERAL (
+                SELECT c.instrument_id, c.trading_date, c.candle_start_at, c."open", c."high",
+                       c."low", c."close", c.volume, c.is_complete, c.data_quality_status,
+                       c.source_timestamp, c.tick_count, c.is_simulated
                 FROM candles_1m c
-                WHERE c.instrument_id = ANY(%(ids)s)
+                WHERE c.instrument_id = wanted.instrument_id
                   AND c.is_complete
                   AND c.candle_start_at <= %(until)s
+                ORDER BY c.candle_start_at DESC
+                LIMIT %(limit)s
             ) recent
-            WHERE recent.rn <= %(limit)s
             ORDER BY recent.instrument_id, recent.candle_start_at ASC
         """
         params = {"ids": list(instrument_ids), "until": until, "limit": limit_per_instrument}

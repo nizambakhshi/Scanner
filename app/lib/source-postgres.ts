@@ -392,18 +392,28 @@ const INTRADAY_SPARK_SQL = `
 
 /** Sparkline series for the /stocks directory: the newest daily closes, oldest
  *  first. 15 points is the horizontal budget of the column; symbols with fewer
- *  bars get fewer points, and symbols with none get no key at all. */
+ *  bars get fewer points, and symbols with none get no key at all.
+ *
+ *  One indexed `LIMIT` walk per instrument down `candles_1d_pkey`
+ *  (instrument_id, trading_date), instead of ranking all 927,509 daily bars and
+ *  throwing 924,000 of them away: the previous window-function form was the
+ *  single slowest statement in the database (6,938 ms per call, §0009). The
+ *  instrument list comes from `instruments`, which is 212 rows, so the read also
+ *  stops depending on how much history the candle tables happen to hold. */
 const DAILY_SPARK_SQL = `
-  WITH ranked AS (
-    SELECT instrument_id, trading_date, close,
-           row_number() OVER (PARTITION BY instrument_id ORDER BY trading_date DESC) AS rn
-    FROM candles_1d
-  )
-  SELECT instrument_id::int AS instrument_id,
-         array_agg(close::float8 ORDER BY trading_date) AS closes
-  FROM ranked
-  WHERE rn <= $1::int
-  GROUP BY instrument_id`;
+  SELECT i.id::int AS instrument_id, s.closes
+  FROM instruments i
+  CROSS JOIN LATERAL (
+    SELECT array_agg(bar.close::float8 ORDER BY bar.trading_date) AS closes
+    FROM (
+      SELECT trading_date, close
+      FROM candles_1d c
+      WHERE c.instrument_id = i.id
+      ORDER BY trading_date DESC
+      LIMIT $1::int
+    ) bar
+  ) s
+  WHERE s.closes IS NOT NULL`;
 
 const SNAPSHOTS_SQL = `
   SELECT id::int AS id, instrument_id::int AS instrument_id, trading_date::text AS trading_date,
