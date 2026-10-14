@@ -19,7 +19,7 @@
 
 import { env, usesPostgres } from "../env";
 import { query, type Raw } from "../db";
-import { verifyPassword } from "./password";
+import { hashPassword, verifyPassword } from "./password";
 
 export type SessionUser = {
   id: string;
@@ -165,6 +165,127 @@ export async function authenticate(
   }
   const { passwordHash: _hash, ...sessionUser } = user;
   return { ok: true, user: sessionUser };
+}
+
+export type ChangePasswordResult = { ok: true; email: string; revokedSessions: number } | { ok: false; status: number; error: string };
+
+const WRONG_CURRENT = "That current password did not match.";
+
+/**
+ * Change the password of the signed-in operator.
+ *
+ * Deliberately paranoid, in this order:
+ *
+ * 1. **The same throttle as sign-in** guards this endpoint too. Someone who has
+ *    walk-up access to a signed-out browser can try passwords here exactly as
+ *    often as at `/login` — no more — and the attempt is written to
+ *    `login_attempts`, so §16's audit list shows a change attempt next to the
+ *    logins around it rather than hiding it.
+ * 2. **The current password is required**, because a stolen session cookie must
+ *    not be enough to take the account over quietly.
+ * 3. **Every other session is revoked** once the hash is written. A password
+ *    change is also the operator's "someone was in my account, get them out"
+ *    button; the request's own session is kept so the form does not log them out
+ *    mid-save.
+ *
+ * Replay mode (no `DATABASE_URL`) has no user table to write to, so it says so
+ * rather than accepting a change that would vanish on the next request.
+ */
+export async function changePassword(
+  user: SessionUser,
+  currentPassword: string,
+  newPassword: string,
+  request: { ip: string | null; keepSessionId: string | null },
+): Promise<ChangePasswordResult> {
+  if (!usesPostgres()) {
+    return {
+      ok: false,
+      status: 409,
+      error: "This copy of the dashboard has no database, so a new password could not be stored. Set AUTH_ADMIN_PASSWORD_HASH instead — `npm run hash-password` prints one.",
+    };
+  }
+
+  // Read the row by id, not by email: the session is the thing being proved.
+  const rows = await query<Raw>(
+    "SELECT email, password_hash, is_active FROM app_users WHERE id = $1::bigint",
+    [user.id],
+  );
+  const row = rows[0];
+  if (!row || row.is_active === false) {
+    return { ok: false, status: 403, error: "This account no longer exists or is disabled." };
+  }
+  const email = String(row.email);
+
+  if (await dbBlocked(email, request.ip)) {
+    return {
+      ok: false,
+      status: 429,
+      error: `Too many failed attempts. Try again in ${FAILURE_WINDOW_MINUTES} minutes.`,
+    };
+  }
+
+  if (!(await verifyPassword(currentPassword, String(row.password_hash)))) {
+    await dbRecordAttempt(email, request.ip, false);
+    return { ok: false, status: 401, error: WRONG_CURRENT };
+  }
+
+  const stored = await hashPassword(newPassword);
+  await query("UPDATE app_users SET password_hash = $2::text WHERE id = $1::bigint", [user.id, stored]);
+
+  // Sign-in throttles on failed attempts only, so a successful change needs no
+  // housekeeping there — but it is worth an audit row.
+  await dbRecordAttempt(email, request.ip, true).catch(() => {});
+
+  const revoked = await query<Raw>(
+    `UPDATE app_sessions SET revoked_at = now()
+     WHERE user_id = $1::bigint AND revoked_at IS NULL AND id <> COALESCE($2::text, '')
+     RETURNING id`,
+    [user.id, request.keepSessionId],
+  ).catch(() => [{ count: 0 }] as Raw[]);
+
+  return { ok: true, email, revokedSessions: revoked.length };
+}
+
+export type AccountFacts = {
+  email: string;
+  role: string;
+  displayName: string | null;
+  /** When this account last signed in successfully. */
+  lastLoginAt: string | null;
+  /** Sessions that are neither revoked nor expired, including this one. */
+  liveSessions: number | null;
+  canChangePassword: boolean;
+};
+
+/** What the account page shows. Every field has a replay-mode answer, so the
+ *  page never has to know which mode it is in. */
+export async function accountFacts(user: SessionUser): Promise<AccountFacts> {
+  const base: AccountFacts = {
+    email: user.email,
+    role: user.role,
+    displayName: user.displayName,
+    lastLoginAt: null,
+    liveSessions: null,
+    canChangePassword: usesPostgres(),
+  };
+  if (!usesPostgres()) return base;
+  const rows = await query<Raw>(
+    `SELECT u.last_login_at::text AS last_login_at,
+            (SELECT COUNT(*)::int FROM app_sessions s
+              WHERE s.user_id = u.id AND s.revoked_at IS NULL AND s.expires_at > now()) AS live_sessions
+     FROM app_users u WHERE u.id = $1::bigint`,
+    [user.id],
+  ).catch(() => [] as Raw[]);
+  const row = rows[0];
+  if (!row) return base;
+  // Postgres prints `2026-10-14 18:30:00.123456+05:30`; `lib/format`'s helpers and
+  // `new Date()` both want the `T` separator, and the offset is already correct.
+  const lastLoginAt = row.last_login_at === null ? null : String(row.last_login_at).replace(" ", "T");
+  return {
+    ...base,
+    lastLoginAt,
+    liveSessions: Number(row.live_sessions ?? 0),
+  };
 }
 
 /** Why sign-in cannot work at all, in operator terms — variable names, never values. */

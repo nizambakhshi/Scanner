@@ -49,3 +49,18 @@ export function passwordProblem(password: string): string | null {
   if (weak.some((candidate) => password.toLowerCase().startsWith(candidate))) return "That is a commonly used password.";
   return null;
 }
+
+/**
+ * The rules for changing a password, with no database and no I/O.
+ *
+ * "Same as before" is checked on the normalised forms rather than the raw strings,
+ * because `normalise()` is what the hash is derived from: a trailing space that
+ * disappears at hashing time would otherwise let someone "change" their password to
+ * the password they already have, and believe the form when it says otherwise.
+ */
+export function changePasswordProblem(currentPassword: string, newPassword: string): string | null {
+  if (currentPassword.length === 0) return "Enter your current password.";
+  if (newPassword.length === 0) return "Enter a new password.";
+  if (normalise(currentPassword) === normalise(newPassword)) return "That is the same as your current password.";
+  return passwordProblem(newPassword);
+}

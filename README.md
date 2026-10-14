@@ -63,6 +63,33 @@ that writes — run `npm run which-db` inside a copy's `app/`. It prints the mas
 connection string, the TLS mode, and `inet_server_addr()` as reported by the server
 itself, which is the one field that cannot lie about which cluster answered.
 
+## Signing in, and changing the password
+
+Sign-in is one email and one password against `app_users` (a scrypt hash; the first login
+bootstraps the admin from `AUTH_ADMIN_EMAIL`/`AUTH_ADMIN_PASSWORD_HASH` **only while that
+table is empty** — a cloned database therefore keeps the source's password, not the new
+environment's). Eight failures from one address in fifteen minutes lock that address out,
+and every attempt, successful or not, is written to `login_attempts`.
+
+**Account** (`/account`) changes the password: it asks for the current one, applies the
+same strength rules as sign-in, and revokes every other session so an unrecognised login
+is ended by the same action that replaced the secret. Wrong current passwords are
+throttled exactly like a failed sign-in.
+
+There is no emailed reset link, and that is deliberate: this app sends no mail, and an
+endpoint that hands out a usable token to whoever names an address is a door rather than a
+recovery path. If the password itself is lost, prove ownership with the database
+connection instead — on the machine that holds it:
+
+```bash
+cd app && npm run reset-password -- --email you@example.com
+```
+
+It prompts twice with the input hidden, takes the password from no argument, confirms the
+target database by name before writing (two copies of this app exist on one machine, and a
+reset aimed at the wrong one is silent), refuses anything `passwordProblem()` would
+refuse, hashes through the app's own `lib/auth/password.ts`, and revokes all sessions.
+
 ## What "qualified" means
 
 A symbol joins the watchlist when, on a **completed** 1-minute candle:

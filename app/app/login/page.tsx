@@ -54,6 +54,14 @@ export default async function LoginPage() {
             hours from sign-in — it does not extend with use, and signing out revokes it in the database as well as
             clearing this browser.
           </p>
+          {/* Deliberate, and worth stating where someone who is locked out will read it:
+              there is no emailed link, because this app sends no mail and an endpoint that
+              hands out reset tokens to whoever names an address is a door, not a recovery
+              path. Both real ways back in are on this machine or behind this form. */}
+          <p className="mt-2 text-[11px] leading-snug text-muted">
+            Forgotten password? Change it from <span className="num">Account</span> while signed in, or run{" "}
+            <span className="num">npm run reset-password</span> where the database connection string lives.
+          </p>
         </div>
       </div>
     </div>
