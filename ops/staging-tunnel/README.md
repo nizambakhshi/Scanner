@@ -72,6 +72,26 @@ equation, which is where the scanning and credential-stuffing noise comes from. 
 dashboard's own throttle (8 failed attempts per 15 minutes per email + IP) still applies.
 Anyone working from outside India needs the rule widened or must sign in from home.
 
+## The tunnel and `next dev` do not agree
+
+`next dev` refuses to serve its own JavaScript to a Host it doesn't recognise, and
+`scanner-staging.maktaba.co.in` is not one it knows. It answers those requests with a
+bare `401 Unauthorized` — which is invisible from the outside: the server-rendered HTML
+arrives fine, so the login page **looks** healthy, but React never hydrates, the form's
+`onSubmit` never attaches, and pressing Sign in makes the browser do a **native GET
+submit** that puts the typed credentials in the URL, the browser history and the dev log.
+No `POST /api/session` is ever sent, so nothing is recorded in `login_attempts` either —
+the failure looks like a wrong password when it is a missing script.
+
+The fix is Next's own: name the origin in `allowedDevOrigins`, fed by
+`DEV_ALLOWED_ORIGINS` in the staging `.env.local` so the hostname never travels into the
+deployed copy's config. `check_http.sh` will not catch this — curl never needs hydration.
+
+Two consequences worth stating plainly. A `curl` 200 on the tunnel proves the *tunnel*,
+not the *page*: everything in the verification list below was done with curl, and the
+browser was still broken. And if the board ever shows credentials in its address bar,
+clear that history entry and scrub the log — `: > /tmp/staging-app.log`.
+
 ## Verification actually performed (2026-10-14)
 
 - Tunnel + DNS route created with `cloudflared` (tunnel `scanner-staging`,
@@ -102,6 +122,11 @@ Anyone working from outside India needs the rule widened or must sign in from ho
   nothing is exposed in practice — but if staging ever runs `start:staging` the flag
   appears, and until then the honest reading is that the tunnel's protection is the
   country rule plus the password, not transport security.
+- **The browser path, after the `allowedDevOrigins` fix**: the tunnelled login page loads
+  its Turbopack dev chunks (200 with the tunnel's `Origin`, where they were 401 before),
+  the log records no cross-origin block, and clicking the theme control flips
+  `DARK`→`LIGHT` without a navigation — which is the observable proof that React hydrated
+  and that Sign in will now `POST` instead of submitting the form as a GET query.
 
 ## Related
 
