@@ -16,6 +16,7 @@ const LINKS = [
   { href: "/history", label: "Days" },
   { href: "/health", label: "Health" },
   { href: "/config", label: "Config" },
+  { href: "/account", label: "Account" },
 ] as const;
 
 export function Nav({ email }: { email: string }) {

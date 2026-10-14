@@ -112,6 +112,11 @@ export async function createSession(user: SessionUser, request: { ip: string | n
   return payload;
 }
 
+/** The jti of the request's own session, so a password change can spare it. */
+export async function currentSessionId(): Promise<string | null> {
+  return readToken((await cookies()).get(SESSION_COOKIE)?.value)?.jti ?? null;
+}
+
 /**
  * Drop rows that cannot authenticate anything.
  *
