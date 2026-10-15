@@ -36,6 +36,12 @@
 # writing candles right now, and a failed migration at 11:00 is a broken board for the
 # rest of the session. `migrate` and `worker` refuse before 15:35 IST unless you pass
 # --anyway.
+#
+# First real run (2026-10-15): migrate/verify/push ran, and three defects in this
+# script surfaced and are fixed in place — the CI watch read the PREVIOUS run (now
+# selected by headSha), the Vercel status read `.status[]` instead of `.statuses[]`,
+# and the worker relaunch left a job-leader subshell holding stdout so the script
+# never exited (see worker() for the detach shape).
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -188,12 +194,31 @@ verify() {
 }
 
 push() {
+  local sha run_id
+  sha=$(git -C "$ROOT" rev-parse HEAD)
   echo "== pushing main"
   git -C "$ROOT" push origin main
   echo
-  echo "== CI"
-  gh run watch "$(gh run list --repo nizambakhshi/Scanner --branch main --limit 1 --json databaseId -q '.[0].databaseId')" \
-      --repo nizambakhshi/Scanner --exit-status || echo "CI is not green — do NOT restart the worker on a build that failed its own tests."
+  echo "== CI for $sha"
+  # The run for a push this fresh does not exist for a few seconds, and a bare
+  # `gh run list --limit 1` returns the PREVIOUS run — on this script's first real
+  # ship that read the old run's 'success' and reported green while the new build
+  # had not started. Select by headSha instead, and wait briefly for it to appear.
+  run_id=""
+  for _ in $(seq 1 30); do
+    run_id=$(gh run list --repo nizambakhshi/Scanner --branch main --limit 20 \
+        --json databaseId,headSha -q ".[] | select(.headSha==\"$sha\") | .databaseId" | head -1)
+    [[ -n "$run_id" ]] && break
+    sleep 2
+  done
+  if [[ -z "$run_id" ]]; then
+    echo "no CI run appeared for $sha within 60s — look at Actions by hand." >&2
+    return 1
+  fi
+  gh run watch "$run_id" --repo nizambakhshi/Scanner --exit-status || {
+    echo "CI is not green — do NOT restart the worker on a build that failed its own tests." >&2
+    return 1
+  }
 }
 
 probe() {
@@ -203,12 +228,15 @@ probe() {
   local sha state url
   sha=$(git -C "$ROOT" rev-parse HEAD)
   echo "== the deployment built from $sha"
+  # The combined-status payload names the array `statuses`; the first version read
+  # `.status[]`, iterated over null on every call, and read as "Vercel reported
+  # nothing" even when the deployment was already green.
   gh api "repos/nizambakhshi/Scanner/commits/$sha/status" \
-      --jq '.status[] | select(.context=="Vercel") | "\(.state)  \(.target_url // "")"'
+      --jq '.statuses[] | select(.context=="Vercel") | "\(.state)  \(.target_url // "")"'
   state=$(gh api "repos/nizambakhshi/Scanner/commits/$sha/status" \
-      --jq '[.status[] | select(.context=="Vercel") | .state][0] // "none"')
+      --jq '[.statuses[] | select(.context=="Vercel") | .state][0] // "none"')
   url=$(gh api "repos/nizambakhshi/Scanner/commits/$sha/status" \
-      --jq '[.status[] | select(.context=="Vercel") | .target_url][0] // ""')
+      --jq '[.statuses[] | select(.context=="Vercel") | .target_url][0] // ""')
   case "$state" in
     success) ;;
     pending) echo "   still building; re-run probe in a minute" ; return 1 ;;
@@ -255,8 +283,18 @@ worker() {
   # -u DATABASE_URL: config.py loads worker/.env with override=False, so a stray
   # DATABASE_URL in this shell would outrank the file the operator edits. The live
   # credential must come from worker/.env and nowhere else.
-  (cd "$WORKER_DIR" && env -u DATABASE_URL -u SCAN_MODE -u TELEGRAM_BOT_TOKEN -u TELEGRAM_CHAT_ID \
-      nohup .venv/bin/scanner-worker >>"$WORKER_LOG" 2>&1 &)
+  #
+  # The detach shape is deliberate. `( cd … && cmd & )` leaves a job-leader subshell
+  # on this machine's bash 3.2 that waits on the worker and inherits the script's
+  # stdout — on this script's first real ship the worker came up healthy but the
+  # script never exited, and anything consuming its output hung with it. Background
+  # the whole parenthesized group with its own fds and `exec` inside: the group
+  # process becomes the worker (fd 0 on /dev/null, fd 1/2 on the log), `disown`
+  # forgets it, and the script exits in seconds. Verified before reuse: wrapper
+  # exits ~2 s; the worker survives with its fds exactly there.
+  ( cd "$WORKER_DIR" && exec env -u DATABASE_URL -u SCAN_MODE -u TELEGRAM_BOT_TOKEN -u TELEGRAM_CHAT_ID \
+      nohup .venv/bin/scanner-worker >>"$WORKER_LOG" 2>&1 ) </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
   sleep 12
   echo
   echo "== what the new process says about itself"
