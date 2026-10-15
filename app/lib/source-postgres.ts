@@ -484,6 +484,21 @@ const SECTOR_SQL = `
   LEFT JOIN sector_quotes sq ON sq.index_symbol = si.index_symbol
   ORDER BY si.display_order, si.index_symbol`;
 
+/** The symbols the news desk tags headlines against: the configured universe,
+ *  same switch as STOCK_OVERVIEW_SQL, one column instead of fifteen. */
+const UNIVERSE_SYMBOLS_SQL = `
+  WITH cfg AS (
+    SELECT COALESCE(
+      (SELECT universe FROM scanner_configs
+       ORDER BY is_enabled DESC, config_version DESC LIMIT 1), 'FNO') AS universe
+  )
+  SELECT i.symbol
+  FROM instruments i CROSS JOIN cfg
+  WHERE i.is_active AND i.mapping_status = 'MAPPED'
+    AND (cfg.universe <> 'FNO' OR i.is_fno)
+    AND (cfg.universe <> 'NIFTY500' OR i.is_nifty500)
+  ORDER BY i.symbol`;
+
 function limit(value: number | undefined, max: number): number {
   return Math.min(Math.max(Math.trunc(value ?? max), 1), max);
 }
@@ -606,5 +621,9 @@ export const postgresSource: ScannerSource = {
 
   async sectorQuotes() {
     return (await query<Raw>(SECTOR_SQL)).map(mapSectorQuote);
+  },
+
+  async universeSymbols() {
+    return (await query<Raw>(UNIVERSE_SYMBOLS_SQL)).map((row) => String(row.symbol));
   },
 };

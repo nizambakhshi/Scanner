@@ -235,6 +235,13 @@ export const replaySource: ScannerSource = {
   async sectorQuotes() {
     return [];
   },
+
+  // Tagging set for the news desk: the fixture carries no is_fno flag, but
+  // every instrument in it is one the replay pipeline actually scanned.
+  async universeSymbols() {
+    const fixture = load();
+    return (fixture?.instruments ?? []).map((raw) => mapInstrument(raw).symbol).filter(Boolean);
+  },
 };
 
 /** The single session row the sample describes, for pages that show "this session". */

@@ -530,4 +530,8 @@ export interface ScannerSource {
   dailySparklines(): Promise<Record<number, number[]>>;
   deliveries(signalIds: number[]): Promise<DeliveryRow[]>;
   sectorQuotes(): Promise<SectorQuoteRow[]>;
+  /** The symbols of the universe the scanner is configured to scan — the same
+   *  F&O / NIFTY500 switch the worker applies. Used to tag news headlines;
+   *  names only, no broker id leaves the database (§19). */
+  universeSymbols(): Promise<string[]>;
 }

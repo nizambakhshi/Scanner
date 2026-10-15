@@ -10,6 +10,7 @@ import { sessionClock, type SessionPhase } from "@/lib/market-clock";
 const LINKS = [
   { href: "/", label: "Board" },
   { href: "/watchlist", label: "Watchlist" },
+  { href: "/news", label: "News" },
   { href: "/strategy", label: "Strategy" },
   { href: "/alerts", label: "Alert rules" },
   { href: "/history", label: "Days" },
