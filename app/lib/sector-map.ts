@@ -1,0 +1,248 @@
+/**
+ * AUTO-GENERATED — do not edit by hand. Regenerate with:
+ *
+ *   node app/scripts/gen-sector-map.mjs
+ *
+ * Sources: NSE index constituent CSVs fetched 2026-10-15 (ind_niftyitlist,
+ * autolist, pharmalist, fmcglist, metallist, energylist, realtylist, medialist,
+ * psubanklist, privatebanklist, financelist, banklist). NSE reshuffles these
+ * semi-annually — re-fetch and regenerate then.
+ *
+ * Precedence, most specific first: PSU BANK, PVT BANK, IT, AUTO, PHARMA, FMCG,
+ * METAL, ENERGY, REALTY, MEDIA, FIN SERVICES, BANK. A PSU bank is also a bank;
+ * the chip says the specific one. The NIFTY 50 is not a sector and is therefore
+ * not represented — a symbol outside all twelve lists has no chip and that is
+ * an honest gap, not a missing edge.
+ *
+ * Keys are exactly the index_symbol strings the worker writes to
+ * sector_indices (worker/worker/marketdata/sectors.py); the chip joins on
+ * them, so they must not be renamed here.
+ */
+
+export type SectorKey =
+  | "NIFTY PSU BANK"
+  | "NIFTY PVT BANK"
+  | "NIFTY IT"
+  | "NIFTY AUTO"
+  | "NIFTY PHARMA"
+  | "NIFTY FMCG"
+  | "NIFTY METAL"
+  | "NIFTY ENERGY"
+  | "NIFTY REALTY"
+  | "NIFTY MEDIA"
+  | "FINNIFTY"
+  | "BANKNIFTY";
+
+/** Short label for the chip; the full index display name goes in its tooltip. */
+export const SECTOR_LABELS: Record<SectorKey, string> = {
+  "NIFTY PSU BANK": "PSU BANK",
+  "NIFTY PVT BANK": "PVT BANK",
+  "NIFTY IT": "IT",
+  "NIFTY AUTO": "AUTO",
+  "NIFTY PHARMA": "PHARMA",
+  "NIFTY FMCG": "FMCG",
+  "NIFTY METAL": "METAL",
+  "NIFTY ENERGY": "ENERGY",
+  "NIFTY REALTY": "REALTY",
+  "NIFTY MEDIA": "MEDIA",
+  FINNIFTY: "FIN SVC",
+  BANKNIFTY: "BANK",
+};
+
+/** Long names as the sector tile renders them (display_name in sectors.py). */
+export const SECTOR_NAMES: Record<SectorKey, string> = {
+  "NIFTY PSU BANK": "Nifty PSU Bank",
+  "NIFTY PVT BANK": "Nifty Private Bank",
+  "NIFTY IT": "Nifty IT",
+  "NIFTY AUTO": "Nifty Auto",
+  "NIFTY PHARMA": "Nifty Pharma",
+  "NIFTY FMCG": "Nifty FMCG",
+  "NIFTY METAL": "Nifty Metal",
+  "NIFTY ENERGY": "Nifty Energy",
+  "NIFTY REALTY": "Nifty Realty",
+  "NIFTY MEDIA": "Nifty Media",
+  FINNIFTY: "Nifty Fin Service",
+  BANKNIFTY: "Nifty Bank",
+};
+
+export const SECTOR_FOR_SYMBOL: Record<string, SectorKey> = {
+  "ABB": "NIFTY ENERGY",
+  "ABBOTINDIA": "NIFTY PHARMA",
+  "ABREL": "NIFTY REALTY",
+  "ADANIENSOL": "NIFTY ENERGY",
+  "ADANIENT": "NIFTY METAL",
+  "ADANIGREEN": "NIFTY ENERGY",
+  "ADANIPOWER": "NIFTY ENERGY",
+  "AEGISLOG": "NIFTY ENERGY",
+  "AJANTPHARM": "NIFTY PHARMA",
+  "ALKEM": "NIFTY PHARMA",
+  "ANANTRAJ": "NIFTY REALTY",
+  "APLAPOLLO": "NIFTY METAL",
+  "ASHOKLEY": "NIFTY AUTO",
+  "ATGL": "NIFTY ENERGY",
+  "AUBANK": "BANKNIFTY",
+  "AUROPHARMA": "NIFTY PHARMA",
+  "AXISBANK": "NIFTY PVT BANK",
+  "BAJAJ-AUTO": "NIFTY AUTO",
+  "BAJAJFINSV": "FINNIFTY",
+  "BAJFINANCE": "FINNIFTY",
+  "BANDHANBNK": "NIFTY PVT BANK",
+  "BANKBARODA": "NIFTY PSU BANK",
+  "BANKINDIA": "NIFTY PSU BANK",
+  "BHARATFORG": "NIFTY AUTO",
+  "BHEL": "NIFTY ENERGY",
+  "BIOCON": "NIFTY PHARMA",
+  "BOSCHLTD": "NIFTY AUTO",
+  "BPCL": "NIFTY ENERGY",
+  "BRIGADE": "NIFTY REALTY",
+  "BRITANNIA": "NIFTY FMCG",
+  "BSE": "FINNIFTY",
+  "CANBK": "NIFTY PSU BANK",
+  "CASTROLIND": "NIFTY ENERGY",
+  "CENTRALBK": "NIFTY PSU BANK",
+  "CESC": "NIFTY ENERGY",
+  "CGPOWER": "NIFTY ENERGY",
+  "CHOLAFIN": "FINNIFTY",
+  "CIPLA": "NIFTY PHARMA",
+  "COALINDIA": "NIFTY ENERGY",
+  "COFORGE": "NIFTY IT",
+  "COLPAL": "NIFTY FMCG",
+  "DABUR": "NIFTY FMCG",
+  "DBCORP": "NIFTY MEDIA",
+  "DIVISLAB": "NIFTY PHARMA",
+  "DLF": "NIFTY REALTY",
+  "DRREDDY": "NIFTY PHARMA",
+  "EICHERMOT": "NIFTY AUTO",
+  "ENRIN": "NIFTY ENERGY",
+  "FEDERALBNK": "NIFTY PVT BANK",
+  "GAIL": "NIFTY ENERGY",
+  "GLAND": "NIFTY PHARMA",
+  "GLENMARK": "NIFTY PHARMA",
+  "GODFRYPHLP": "NIFTY FMCG",
+  "GODREJCP": "NIFTY FMCG",
+  "GODREJPROP": "NIFTY REALTY",
+  "GVT&D": "NIFTY ENERGY",
+  "HCLTECH": "NIFTY IT",
+  "HDFCBANK": "NIFTY PVT BANK",
+  "HDFCLIFE": "FINNIFTY",
+  "HEROMOTOCO": "NIFTY AUTO",
+  "HINDALCO": "NIFTY METAL",
+  "HINDCOPPER": "NIFTY METAL",
+  "HINDPETRO": "NIFTY ENERGY",
+  "HINDUNILVR": "NIFTY FMCG",
+  "HINDZINC": "NIFTY METAL",
+  "HYUNDAI": "NIFTY AUTO",
+  "ICICIBANK": "NIFTY PVT BANK",
+  "ICICIGI": "FINNIFTY",
+  "IDFCFIRSTB": "NIFTY PVT BANK",
+  "IGL": "NIFTY ENERGY",
+  "INDIANB": "NIFTY PSU BANK",
+  "INDUSINDBK": "NIFTY PVT BANK",
+  "INFY": "NIFTY IT",
+  "INOXWIND": "NIFTY ENERGY",
+  "IOB": "NIFTY PSU BANK",
+  "IOC": "NIFTY ENERGY",
+  "IPCALAB": "NIFTY PHARMA",
+  "ITC": "NIFTY FMCG",
+  "JINDALSTEL": "NIFTY METAL",
+  "JIOFIN": "FINNIFTY",
+  "JPPOWER": "NIFTY ENERGY",
+  "JSL": "NIFTY METAL",
+  "JSWENERGY": "NIFTY ENERGY",
+  "JSWSTEEL": "NIFTY METAL",
+  "KOTAKBANK": "NIFTY PVT BANK",
+  "LAURUSLABS": "NIFTY PHARMA",
+  "LICHSGFIN": "FINNIFTY",
+  "LLOYDSME": "NIFTY METAL",
+  "LODHA": "NIFTY REALTY",
+  "LTM": "NIFTY IT",
+  "LUPIN": "NIFTY PHARMA",
+  "M&M": "NIFTY AUTO",
+  "MAHABANK": "NIFTY PSU BANK",
+  "MANKIND": "NIFTY PHARMA",
+  "MARICO": "NIFTY FMCG",
+  "MARUTI": "NIFTY AUTO",
+  "MFSL": "FINNIFTY",
+  "MGL": "NIFTY ENERGY",
+  "MOTHERSON": "NIFTY AUTO",
+  "MPHASIS": "NIFTY IT",
+  "MPSLTD": "NIFTY MEDIA",
+  "MUTHOOTFIN": "FINNIFTY",
+  "NATIONALUM": "NIFTY METAL",
+  "NAVA": "NIFTY ENERGY",
+  "NAZARA": "NIFTY MEDIA",
+  "NESTLEIND": "NIFTY FMCG",
+  "NETWORK18": "NIFTY MEDIA",
+  "NHPC": "NIFTY ENERGY",
+  "NLCINDIA": "NIFTY ENERGY",
+  "NMDC": "NIFTY METAL",
+  "NTPC": "NIFTY ENERGY",
+  "NTPCGREEN": "NIFTY ENERGY",
+  "OBEROIRLTY": "NIFTY REALTY",
+  "OFSS": "NIFTY IT",
+  "OIL": "NIFTY ENERGY",
+  "ONGC": "NIFTY ENERGY",
+  "PATANJALI": "NIFTY FMCG",
+  "PERSISTENT": "NIFTY IT",
+  "PETRONET": "NIFTY ENERGY",
+  "PFC": "FINNIFTY",
+  "PFOCUS": "NIFTY MEDIA",
+  "PHOENIXLTD": "NIFTY REALTY",
+  "PNB": "NIFTY PSU BANK",
+  "POWERGRID": "NIFTY ENERGY",
+  "POWERINDIA": "NIFTY ENERGY",
+  "PPLPHARMA": "NIFTY PHARMA",
+  "PRESTIGE": "NIFTY REALTY",
+  "PSB": "NIFTY PSU BANK",
+  "PVRINOX": "NIFTY MEDIA",
+  "RADICO": "NIFTY FMCG",
+  "RBLBANK": "NIFTY PVT BANK",
+  "RECLTD": "FINNIFTY",
+  "RELIANCE": "NIFTY ENERGY",
+  "RPOWER": "NIFTY ENERGY",
+  "SAIL": "NIFTY METAL",
+  "SAILIFE": "NIFTY PHARMA",
+  "SAREGAMA": "NIFTY MEDIA",
+  "SBICARD": "FINNIFTY",
+  "SBILIFE": "FINNIFTY",
+  "SBIN": "NIFTY PSU BANK",
+  "SHRIRAMFIN": "FINNIFTY",
+  "SIEMENS": "NIFTY ENERGY",
+  "SOBHA": "NIFTY REALTY",
+  "SONACOMS": "NIFTY AUTO",
+  "SUNPHARMA": "NIFTY PHARMA",
+  "SUNTV": "NIFTY MEDIA",
+  "SUZLON": "NIFTY ENERGY",
+  "TATACONSUM": "NIFTY FMCG",
+  "TATAPOWER": "NIFTY ENERGY",
+  "TATASTEEL": "NIFTY METAL",
+  "TCS": "NIFTY IT",
+  "TDPOWERSYS": "NIFTY ENERGY",
+  "TECHM": "NIFTY IT",
+  "THERMAX": "NIFTY ENERGY",
+  "TIINDIA": "NIFTY AUTO",
+  "TIPSMUSIC": "NIFTY MEDIA",
+  "TMPV": "NIFTY AUTO",
+  "TORNTPHARM": "NIFTY PHARMA",
+  "TORNTPOWER": "NIFTY ENERGY",
+  "TVSMOTOR": "NIFTY AUTO",
+  "UBL": "NIFTY FMCG",
+  "UCOBANK": "NIFTY PSU BANK",
+  "UNIONBANK": "NIFTY PSU BANK",
+  "UNITDSPR": "NIFTY FMCG",
+  "UNOMINDA": "NIFTY AUTO",
+  "VAML": "NIFTY METAL",
+  "VBL": "NIFTY FMCG",
+  "VEDL": "NIFTY METAL",
+  "WIPRO": "NIFTY IT",
+  "WOCKPHARMA": "NIFTY PHARMA",
+  "YESBANK": "NIFTY PVT BANK",
+  "ZEEL": "NIFTY MEDIA",
+  "ZYDUSLIFE": "NIFTY PHARMA",
+};
+
+/** The sector index a symbol belongs to, or null — unknown is a fact, not a guess. */
+export function sectorFor(symbol: string | null | undefined): SectorKey | null {
+  if (!symbol) return null;
+  return SECTOR_FOR_SYMBOL[symbol.trim().toUpperCase()] ?? null;
+}

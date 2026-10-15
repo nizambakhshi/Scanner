@@ -7,6 +7,7 @@ import { SignalsTable } from "@/components/SignalsTable";
 import { ago, clock, duration, longDate, orDash } from "@/lib/format";
 import { ok, panel } from "@/lib/panel";
 import { renderNow } from "@/lib/render-time";
+import { sectorReadsFrom } from "@/lib/sector-reads";
 import { source } from "@/lib/source";
 
 export const dynamic = "force-dynamic";
@@ -24,26 +25,34 @@ export const dynamic = "force-dynamic";
  * indistinguishable from a screen that has nothing to show.
  */
 export default async function BoardPage() {
-  const [worker, coverage, watchlist, alerts, initialScan, day, sectors, sparks] = await Promise.all([
+  // The board is anchored on the IST calendar date, same as the watchlist: the
+  // memberships and the feed are read for today, never for "whatever the
+  // newest rows happen to be".
+  const today = await source().activeTradingDate();
+
+  const [worker, coverage, watchlist, alerts, initialScan, days, sectors, sparks] = await Promise.all([
     panel(async () => source().workerStatus()),
     panel(async () => source().coverage()),
-    panel(async () => source().currentWatchlist()),
-    panel(async () => source().signals({ limit: 12 })),
+    panel(async () => source().currentWatchlist(today)),
+    panel(async () => source().signals({ tradingDate: today, limit: 12 })),
     panel(async () => source().initialScan()),
-    panel(async () => source().history(1)),
+    panel(async () => source().history(2)),
     panel(async () => source().sectorQuotes()),
     panel(async () => source().intradaySparklines()),
   ]);
 
   const status = ok(worker) ? worker.data[0] ?? null : null;
   const counts = ok(coverage) ? coverage.data : null;
-  const rows = ok(watchlist) ? watchlist.data : [];
+  // Belt to the source filter's braces — today's rows only, in code too.
+  const rows = (ok(watchlist) ? watchlist.data : []).filter((row) => !today || row.trading_date === today);
   const recent = ok(alerts) ? alerts.data : [];
   const scan = ok(initialScan) ? initialScan.data : null;
-  const session = ok(day) ? day.data[0] ?? null : null;
+  const session = ok(days) && today ? (days.data.find((row) => row.trading_date === today) ?? null) : null;
   // A failed series read drops the Trend column entirely — a column of dashes
   // would suggest the data was read and found empty.
   const sparklines = ok(sparks) ? sparks.data : undefined;
+  // One fold, two consumers: the tile takes the raw rows, the chips take this.
+  const sectorReads = ok(sectors) ? sectorReadsFrom(sectors.data) : undefined;
 
   const active = rows.filter((row) => row.current_state === "ACTIVE" || row.current_state === "REQUALIFIED");
   const stale = rows.filter((row) => row.current_state === "DATA_STALE");
@@ -57,7 +66,9 @@ export default async function BoardPage() {
         title="Board"
         subtitle={
           <>
-            {session ? `${longDate(session.trading_date)} · ${orDash(session.session_status)}` : "No session recorded yet."}{" "}
+            {today
+              ? `${longDate(today)} · ${session ? orDash(session.session_status) : "no session yet"}`
+              : "No trading day could be named."}{" "}
             The scanner acts only on completed 1-minute candles, so every number here is at most one candle behind the tape.
           </>
         }
@@ -125,7 +136,7 @@ export default async function BoardPage() {
         }
       >
         {ok(watchlist) ? (
-          <WatchlistTable rows={rows.slice(0, 8)} sparklines={sparklines} />
+          <WatchlistTable rows={rows.slice(0, 8)} sparklines={sparklines} sectorReads={sectorReads} />
         ) : (
           <ErrorNote title="Watchlist unavailable" detail={watchlist.error} />
         )}
@@ -255,7 +266,7 @@ export default async function BoardPage() {
         }
       >
         {ok(alerts) ? (
-          <SignalsTable signals={recent} compact />
+          <SignalsTable signals={recent} sectorReads={sectorReads} compact />
         ) : (
           <ErrorNote title="Alert feed unavailable" detail={alerts.error} />
         )}

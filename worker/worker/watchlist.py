@@ -21,6 +21,11 @@ Transition rules, implemented exactly as specified:
 ``DATA_STALE``
     the feed for this instrument cannot be trusted right now; the row is parked,
     not removed.
+
+The price cap (``max_price``) gates *entry only*: a name trading above the cap
+is not taken onto the watchlist and does not re-qualify, but a membership that
+already exists keeps its whole state machine — the cap can keep names out, it
+never removes one that is already being tracked. 0 disables the cap.
 """
 
 from __future__ import annotations
@@ -156,6 +161,15 @@ class WatchlistManager:
 
         if membership is None:
             if bullish and evaluable:
+                if self._above_price_cap(snapshot):
+                    return WatchlistOutcome(
+                        instrument_id=instrument.id,
+                        symbol=instrument.symbol,
+                        previous_state=None,
+                        state=WatchlistState.REMOVED,
+                        reason="above tracking cap",
+                        details={"max_price": self.params.max_price, "close": snapshot.close},
+                    )
                 created = await self._enter(
                     session_id=session_id,
                     instrument=instrument,
@@ -186,6 +200,20 @@ class WatchlistManager:
 
         if bullish and evaluable:
             if membership.current_state in (WatchlistState.REMOVED, WatchlistState.DATA_STALE):
+                if self._above_price_cap(snapshot):
+                    # A capped name does not re-enter; the row keeps whatever
+                    # state it already had (REMOVED / DATA_STALE) and only its
+                    # score note moves, exactly like any other untracked row.
+                    await self.store.update_membership(membership.id, **updates)
+                    return WatchlistOutcome(
+                        instrument_id=instrument.id,
+                        symbol=instrument.symbol,
+                        previous_state=previous,
+                        state=membership.current_state,
+                        reason="above tracking cap: not requalified",
+                        details={"max_price": self.params.max_price, "close": snapshot.close},
+                        membership=membership,
+                    )
                 outcome = await self._enter(
                     session_id=session_id,
                     instrument=instrument,
@@ -396,6 +424,7 @@ class WatchlistManager:
             "stale": 0,
             "not_qualified": 0,
             "missing_data": 0,
+            "above_price_cap": 0,
         }
         for instrument in instruments:
             payload = latest.get(instrument.id)
@@ -404,6 +433,16 @@ class WatchlistManager:
                 continue
             candle, snapshot, bullish, evaluable, reasons = payload
             counts["evaluated"] += 1
+            if self._above_price_cap(snapshot):
+                # A capped name with no membership anywhere is counted and
+                # skipped outright. One that *has* a membership (from an
+                # earlier scan or before the cap was configured) still goes
+                # through ``on_candle``: the gates there block re-entry while
+                # leaving its existing state machine untouched.
+                membership = await self.store.get_membership(session_id, instrument.id)
+                if membership is None:
+                    counts["above_price_cap"] += 1
+                    continue
             outcome = await self.on_candle(
                 session_id=session_id,
                 trading_date=trading_date,
@@ -469,6 +508,18 @@ class WatchlistManager:
         }
 
     # ── internals ─────────────────────────────────────────────────────────
+
+    def _above_price_cap(self, snapshot: IndicatorSnapshot) -> bool:
+        """The operator's price cap: F&O names above ``max_price`` are not
+        taken onto the watchlist.
+
+        Compares the snapshot close — the price the entry itself would record —
+        so the gate and the recorded ``initial_entry_price`` can never disagree.
+        Active only while the cap is positive; ``0`` disables it entirely. This
+        gates *entry* (fresh admission and re-qualification); it never removes
+        a membership that is already tracked.
+        """
+        return self.params.max_price > 0 and snapshot.close > self.params.max_price
 
     async def _enter(
         self,

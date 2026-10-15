@@ -34,6 +34,7 @@ DEFAULTS_ENV_KEYS = (
     "CANDLE_GRACE_SECONDS",
     "INITIAL_SCAN_CANDLES",
     "MAX_SUBSCRIBED_INSTRUMENTS",
+    "MAX_PRICE",
     "UNIVERSE",
 )
 
@@ -108,6 +109,13 @@ class ScannerParams:
     """
 
     universe: str = "NIFTY500"
+    # F&O names whose latest close is above this are not taken onto the
+    # watchlist — the operator's rule (2026-10-15): high-priced stocks
+    # (CMP > ₹2,000) are not traded on this system. A *cap on entry only*:
+    # a membership that qualified before a cap was configured keeps its
+    # state machine, and the gate never removes a tracked symbol. 0
+    # disables the cap.
+    max_price: float = 2000.0
     fast_ema_period: int = 9
     slow_ema_period: int = 20
     # MACD(12, 26, 9) for the intraday engine, on the same five-minute closes
@@ -142,6 +150,7 @@ class ScannerParams:
     def from_env(cls, raw: Mapping[str, str]) -> ScannerParams:
         return cls(
             universe=(_get(raw, "UNIVERSE") or "NIFTY500").upper(),
+            max_price=_float(raw, "MAX_PRICE", 2000.0),
             fast_ema_period=_int(raw, "FAST_EMA_PERIOD", 9),
             slow_ema_period=_int(raw, "SLOW_EMA_PERIOD", 20),
             macd_fast_period=_int(raw, "MACD_FAST_PERIOD", 12),
@@ -167,6 +176,8 @@ class ScannerParams:
         errors: list[str] = []
         if self.universe not in ("NIFTY500", "FNO"):
             errors.append("UNIVERSE must be NIFTY500 or FNO")
+        if self.max_price < 0:
+            errors.append("MAX_PRICE must be >= 0 (0 disables the cap)")
         if self.fast_ema_period < 2:
             errors.append("FAST_EMA_PERIOD must be >= 2")
         if self.slow_ema_period <= self.fast_ema_period:
@@ -215,6 +226,7 @@ class ScannerParams:
         """Public shape stored as the DB config snapshot (no secrets)."""
         return {
             "universe": self.universe,
+            "max_price": self.max_price,
             "fast_ema_period": self.fast_ema_period,
             "slow_ema_period": self.slow_ema_period,
             "volume_lookback": self.volume_lookback,

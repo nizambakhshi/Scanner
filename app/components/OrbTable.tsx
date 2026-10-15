@@ -1,7 +1,10 @@
 import Link from "next/link";
+import { SectorChip } from "./SectorChip";
 import { Empty } from "./ui";
 import { clock, orDash, price } from "@/lib/format";
 import { ORB_VOLUME_MULTIPLE } from "@/lib/orb";
+import type { SectorReads } from "@/lib/sector-reads";
+import { sectorFor } from "@/lib/sector-map";
 import type { OrbStatus, OrbView } from "@/lib/types";
 
 /**
@@ -10,7 +13,7 @@ import type { OrbStatus, OrbView } from "@/lib/types";
  * table shows what the stored 1-minute candles say, and the scanner never places
  * orders. A dash always means "the session has not produced this yet", never 0.
  */
-export function OrbTable({ views }: { views: OrbView[] }) {
+export function OrbTable({ views, sectorReads }: { views: OrbView[]; sectorReads?: SectorReads }) {
   if (views.length === 0) {
     return <Empty>No 1-minute candles for any universe instrument yet — the board fills in from the stored session bars.</Empty>;
   }
@@ -40,7 +43,7 @@ export function OrbTable({ views }: { views: OrbView[] }) {
         </thead>
         <tbody>
           {views.map((view) => (
-            <OrbRow key={view.row.instrument_id} view={view} />
+            <OrbRow key={view.row.instrument_id} view={view} sectorReads={sectorReads} />
           ))}
         </tbody>
       </table>
@@ -48,11 +51,12 @@ export function OrbTable({ views }: { views: OrbView[] }) {
   );
 }
 
-function OrbRow({ view }: { view: OrbView }) {
+function OrbRow({ view, sectorReads }: { view: OrbView; sectorReads?: SectorReads }) {
   const { row } = view;
   const breakoutAt = view.direction === "UP" ? row.bu_at : view.direction === "DOWN" ? row.bd_at : null;
   const breakoutClose = view.direction === "UP" ? row.bu_close : view.direction === "DOWN" ? row.bd_close : null;
   const ratio = view.direction === "UP" ? row.bu_ratio : view.direction === "DOWN" ? row.bd_ratio : null;
+  const sector = sectorFor(row.symbol);
 
   return (
     <tr className="row-hover border-b border-line last:border-0">
@@ -61,6 +65,9 @@ function OrbRow({ view }: { view: OrbView }) {
           {row.symbol}
         </Link>
         <div className="mt-0.5 max-w-[220px] truncate text-[11px] text-muted">{orDash(row.company_name)}</div>
+        <div className="mt-1">
+          <SectorChip sector={sector} initial={sector ? (sectorReads?.[sector] ?? null) : null} />
+        </div>
       </td>
       <td className="td num text-right">
         {view.width === null ? "—" : `${price(row.or_low)} – ${price(row.or_high)}`}

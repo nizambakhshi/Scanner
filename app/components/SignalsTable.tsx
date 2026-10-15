@@ -1,8 +1,11 @@
 import Link from "next/link";
+import { SectorChip } from "./SectorChip";
+import type { SectorReads } from "@/lib/sector-reads";
 import { SimChip } from "./SimulatedBanner";
 import { DeliveryBadge, SignalBadge, StrategyChip } from "./badges";
 import { Empty } from "./ui";
 import { clock, multiple, pct, price, score } from "@/lib/format";
+import { sectorFor } from "@/lib/sector-map";
 import type { DeliveryRow, SignalRow } from "@/lib/types";
 
 /**
@@ -18,10 +21,14 @@ export function SignalsTable({
   signals,
   deliveries = [],
   compact = false,
+  sectorReads,
 }: {
   signals: SignalRow[];
   deliveries?: DeliveryRow[];
   compact?: boolean;
+  /** The sector indices' readings for first paint; the chips then keep
+   *  themselves current off the shared poller. */
+  sectorReads?: SectorReads;
 }) {
   if (signals.length === 0) return <Empty>No signals for this filter.</Empty>;
   const bySignal = new Map<number, DeliveryRow[]>();
@@ -51,6 +58,7 @@ export function SignalsTable({
           {signals.map((signal) => {
             const telegram = bySignal.get(signal.id)?.find((row) => row.channel === "TELEGRAM");
             const href = signal.symbol ? `/instrument/${encodeURIComponent(signal.symbol)}` : null;
+            const sector = sectorFor(signal.symbol);
             return (
               <tr key={`${signal.id}-${signal.signal_type}`} className="row-hover border-b border-line last:border-0">
                 <td className="td">
@@ -67,7 +75,8 @@ export function SignalsTable({
                   ) : (
                     <span className="num font-semibold">{signal.symbol ?? "session"}</span>
                   )}
-                  <div className="mt-0.5 flex items-center gap-1">
+                  <div className="mt-0.5 flex flex-wrap items-center gap-1">
+                    <SectorChip sector={sector} initial={sector ? (sectorReads?.[sector] ?? null) : null} />
                     <SimChip value={signal.is_simulated} />
                   </div>
                 </td>

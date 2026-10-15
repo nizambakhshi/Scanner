@@ -164,13 +164,34 @@ def test_atr_defaults_parsing_and_validation() -> None:
         C.ScannerParams(atr_period=1).validate()
 
 
+def test_max_price_defaults_parsing_and_validation() -> None:
+    # The operator's rule (2026-10-15): F&O names above ₹2,000 CMP are not
+    # tracked. 0 disables the cap outright; a negative cap is nonsensical and
+    # must be rejected at startup, not silently treated as "no cap".
+    defaults = C.ScannerParams.from_env({})
+    assert defaults.max_price == 2000.0
+    parsed = C.ScannerParams.from_env({"MAX_PRICE": "1500.5"})
+    assert parsed.max_price == 1500.5
+    disabled = C.ScannerParams.from_env({"MAX_PRICE": "0"})
+    assert disabled.max_price == 0.0
+    disabled.validate()
+    with pytest.raises(C.ConfigError, match="MAX_PRICE must be >= 0"):
+        C.ScannerParams(max_price=-1).validate()
+    assert "MAX_PRICE" in C.DEFAULTS_ENV_KEYS
+
+
 def test_scanner_config_public_shape_is_unchanged() -> None:
     # The config snapshot the heartbeat and dashboard consume keeps exactly the
     # keys it had before Phases 2B/2C: the MACD and ATR knobs live on the env
     # side for now and must not leak into the public shape until the DB columns
-    # land.
+    # land — with one deliberate exception: ``max_price``. It is not an input to
+    # a detector, it *gates what enters the watchlist*, so a snapshot that
+    # omitted it would let the dashboard claim a universe the worker is not
+    # actually tracking. It stays env-only (no scanner_configs column yet), but
+    # it must be visible.
     assert set(C.ScannerParams().to_dict()) == {
         "universe",
+        "max_price",
         "fast_ema_period",
         "slow_ema_period",
         "volume_lookback",

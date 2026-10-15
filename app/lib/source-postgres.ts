@@ -42,6 +42,7 @@ import type {
   SourceMeta,
 } from "./types";
 import { jsonRecord, toIst } from "./format";
+import { istToday } from "./market-clock";
 
 const COVERAGE_SQL = `
   SELECT nifty500_count::int AS nifty500_count,
@@ -241,11 +242,13 @@ const WEEKLY_RSI_SQL = `
   LIMIT $2::int`;
 
 /**
- * The /strategy ORB board: for every instrument in the configured universe, the
- * newest session's opening range and first 5-minute breakout, computed from the
+ * The /strategy ORB board: for every instrument in the configured universe, one
+ * session's opening range and first 5-minute breakout, computed from the
  * stored 1-minute candles only.
  *
- * Session window: the newest `trading_date` in candles_1m, 9:15–15:30 IST. The
+ * Session window: `$1` when given — and only when candles exist for it — the
+ * newest `trading_date` in candles_1m otherwise, 9:15–15:30 IST. A day with no
+ * candles yields no rows (never a silent fallback to an older day). The
  * series is cut into 5-minute buckets by wall-clock offset from the open
  * (`bucket` 0 IS the opening range), so a bucket close is the last 1-minute
  * close in it — exactly the "5-minute close" the strategy trades on. The first
@@ -269,7 +272,14 @@ const ORB_STRATEGY_SQL = `
     SELECT d.trading_date,
            (d.trading_date::timestamp + time '09:15') AT TIME ZONE 'Asia/Kolkata' AS open_at,
            (d.trading_date::timestamp + time '15:30') AT TIME ZONE 'Asia/Kolkata' AS close_at
-    FROM (SELECT max(trading_date) AS trading_date FROM candles_1m) d
+    FROM (
+      SELECT trading_date FROM (
+        SELECT DISTINCT trading_date FROM candles_1m
+      ) t
+      WHERE $1::date IS NULL OR trading_date = $1::date
+      ORDER BY trading_date DESC
+      LIMIT 1
+    ) d
   ),
   u AS (
     SELECT i.id AS instrument_id, i.symbol, i.trading_symbol, i.company_name
@@ -352,7 +362,7 @@ const ORB_STRATEGY_SQL = `
          lt.last_at AS latest_at, lt.close::float8 AS latest_close,
          (lt.price_volume_through / nullif(lt.volume_through, 0))::float8 AS session_vwap,
          sn.snap_at, sn.ema9::float8 AS ema9, sn.ema20::float8 AS ema20
-  FROM u
+  FROM u CROSS JOIN w
   LEFT JOIN orng o USING (instrument_id)
   LEFT JOIN bu USING (instrument_id)
   LEFT JOIN bd USING (instrument_id)
@@ -516,6 +526,12 @@ export const postgresSource: ScannerSource = {
     return (await query<Raw>(WORKER_SQL)).map(mapWorker);
   },
 
+  async activeTradingDate() {
+    // The IST calendar day, computed here rather than in SQL: "today" is a
+    // property of the viewer's clock, not of how far the worker has written.
+    return istToday(new Date());
+  },
+
   async currentWatchlist(tradingDate) {
     return (await query<Raw>(WATCHLIST_SQL, [dateParam(tradingDate), null])).map(mapWatchlist);
   },
@@ -568,8 +584,8 @@ export const postgresSource: ScannerSource = {
     return (await query<Raw>(STOCK_OVERVIEW_SQL, [null])).map(mapStockOverview);
   },
 
-  async orbStrategy() {
-    return (await query<Raw>(ORB_STRATEGY_SQL)).map(mapOrbRow);
+  async orbStrategy(tradingDate) {
+    return (await query<Raw>(ORB_STRATEGY_SQL, [dateParam(tradingDate)])).map(mapOrbRow);
   },
 
   async intradaySparklines() {

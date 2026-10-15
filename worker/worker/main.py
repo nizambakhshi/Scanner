@@ -405,8 +405,14 @@ class WorkerRuntime:
                 note="no scanner_configs row exists; the session runs on the worker's built-in defaults",
             )
             return
+        # The ₹ cap on tracked names is an operator-level rule carried by the
+        # environment, not a per-universe knob the dashboard edits: the
+        # schema-bound config row (explicit columns) cannot express it yet, so
+        # adoption *merges* it in rather than silently reverting the env value
+        # to the dataclass default. Everything else comes from the row.
+        adopted = replace(row.params, max_price=self.params.max_price)
         try:
-            row.params.validate()
+            adopted.validate()
         except ConfigError as exc:
             log.error(
                 "scanner_config_invalid",
@@ -415,19 +421,20 @@ class WorkerRuntime:
                 action_required="save a valid config from the dashboard; running on env defaults until then",
             )
             return
-        self.params = row.params
+        self.params = adopted
         self._config_version = row.config_version
         log.info(
             "scanner_config_adopted",
             source="scanner_configs",
             version=row.config_version,
-            universe=row.params.universe,
-            fast_ema_period=row.params.fast_ema_period,
-            slow_ema_period=row.params.slow_ema_period,
-            volume_lookback=row.params.volume_lookback,
-            relative_volume_threshold=row.params.relative_volume_threshold,
-            alert_cooldown_minutes=row.params.alert_cooldown_minutes,
-            removal_confirm_candles=row.params.removal_confirm_candles,
+            universe=adopted.universe,
+            fast_ema_period=adopted.fast_ema_period,
+            slow_ema_period=adopted.slow_ema_period,
+            volume_lookback=adopted.volume_lookback,
+            relative_volume_threshold=adopted.relative_volume_threshold,
+            alert_cooldown_minutes=adopted.alert_cooldown_minutes,
+            removal_confirm_candles=adopted.removal_confirm_candles,
+            max_price=adopted.max_price,
         )
 
     async def _adopt_alert_settings(self) -> dict[str, Any]:

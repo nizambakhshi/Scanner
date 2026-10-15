@@ -7,12 +7,14 @@ Section comments (# §n) map to the numbered product rules in the brief.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
 from tests.conftest import BASE_DAY, candle, minute
 from worker.alerts import AlertEngine
+from worker.config import ScannerParams
 from worker.models import (
     DataQuality,
     IndicatorSnapshot,
@@ -178,6 +180,106 @@ async def test_non_bullish_candle_never_creates_row(manager):
     assert outcome.changed is False
     assert manager.store.memberships == {}
     assert manager.store.events == []
+
+
+# ── ₹ price cap on tracking (max_price) ─────────────────────────────────────
+
+
+def capped_manager(store: InMemoryStore, params: ScannerParams, cap: float) -> WatchlistManager:
+    return WatchlistManager(store=store, params=replace(params, max_price=cap))
+
+
+async def test_above_price_cap_never_enters_the_watchlist(store, params):
+    # The operator's rule: an F&O name above the CMP cap is not tracked, even
+    # when every strategy condition holds. Nothing is written — no row, no
+    # event — and the outcome says exactly why.
+    manager = capped_manager(store, params, 2000.0)
+    outcome = await feed(
+        manager, inst(), snap(close=2500.0, candle_start=minute(5)), offset=5, bullish=True
+    )
+
+    assert outcome.changed is False
+    assert outcome.membership is None
+    assert outcome.state is WatchlistState.REMOVED
+    assert outcome.reason == "above tracking cap"
+    assert outcome.details == {"max_price": 2000.0, "close": 2500.0}
+    assert store.memberships == {}
+    assert store.events == []
+
+
+async def test_close_exactly_at_the_cap_still_enters(store, params):
+    # The rule is "above ₹2,000", so exactly at the cap is inside it: the gate
+    # is a strict comparison, pinned so a later ">=" rewrite is caught.
+    manager = capped_manager(store, params, 2000.0)
+    outcome = await feed(
+        manager, inst(), snap(close=2000.0, candle_start=minute(5)), offset=5, bullish=True
+    )
+    assert outcome.state is WatchlistState.ACTIVE
+    assert outcome.event_type == "ADDED"
+
+
+async def test_zero_cap_disables_the_gate(store, params):
+    manager = capped_manager(store, params, 0.0)
+    outcome = await feed(
+        manager, inst(), snap(close=5000.0, candle_start=minute(5)), offset=5, bullish=True
+    )
+    assert outcome.state is WatchlistState.ACTIVE
+    assert outcome.event_type == "ADDED"
+
+
+async def test_cap_gates_entry_only_and_never_removes_a_tracked_row(store, params):
+    # Entered below the cap; the price then rallies above it. The cap must not
+    # evict the row — its state machine keeps running, and the removal rule
+    # still removes it strictly on its own predicate.
+    manager = capped_manager(store, params, 2000.0)
+    await feed(manager, inst(), snap(close=1500.0, candle_start=minute(5)), offset=5, bullish=True)
+    assert row(store).current_state is WatchlistState.ACTIVE
+
+    above = {"close": 2400.0, "vwap": 2500.0, "ema_fast": 2300.0, "ema_slow": 2350.0}
+    for offset in (6, 7, 8):
+        await feed(
+            manager,
+            inst(),
+            snap(candle_start=minute(offset), **above),
+            offset=offset,
+            bullish=False,
+        )
+    stored = row(store)
+    assert stored.current_state is WatchlistState.REMOVED
+    assert stored.is_active is False
+
+
+async def test_requalification_above_cap_is_blocked_and_keeps_the_row_state(store, params):
+    # A row removed earlier (while its price was inside the cap) cannot come
+    # back on a bullish candle once the price sits above the cap: REMOVED is
+    # kept, no REQUALIFIED event is minted, the episode count is frozen.
+    open_manager = capped_manager(store, params, 0.0)  # cap off for the first episode
+    await feed(
+        open_manager, inst(), snap(close=3000.0, candle_start=minute(5)), offset=5, bullish=True
+    )
+    bearish = {"close": 3000.0, "vwap": 3100.0, "ema_fast": 2900.0, "ema_slow": 2950.0}
+    for offset in (6, 7, 8):
+        await feed(
+            open_manager,
+            inst(),
+            snap(candle_start=minute(offset), **bearish),
+            offset=offset,
+            bullish=False,
+        )
+    assert row(store).current_state is WatchlistState.REMOVED
+    episode = row(store).episode_count
+
+    capped = capped_manager(store, params, 2000.0)
+    outcome = await feed(
+        capped, inst(), snap(close=3000.0, candle_start=minute(9)), offset=9, bullish=True
+    )
+
+    assert outcome.state is WatchlistState.REMOVED
+    assert outcome.reason == "above tracking cap: not requalified"
+    stored = row(store)
+    assert stored.current_state is WatchlistState.REMOVED
+    assert stored.episode_count == episode
+    assert "REQUALIFIED" not in event_types(store)
 
 
 # ── §2 WEAKENING ─────────────────────────────────────────────────────────────
@@ -557,6 +659,76 @@ async def test_initial_scan_not_evaluable_counts_as_warming_up(manager):
     assert summary["counts"]["qualified"] == 0
     assert summary["ranked"] == []
     assert manager.store.memberships == {}
+
+
+async def test_initial_scan_counts_capped_names_and_skips_them(store, params):
+    # A fresh name above the cap is counted as above_price_cap and never
+    # evaluated onto the sheet — no row, no entry event — while a below-cap
+    # qualifier still enters and is ranked.
+    manager = capped_manager(store, params, 2000.0)
+    pricey = inst(id=1, symbol="MARUTI")
+    cheap = inst(id=2, symbol="TATAMOTORS")
+    latest = {
+        1: (
+            candle(close=2500.0, offset_minutes=40, instrument_id=1),
+            snap(instrument_id=1, close=2500.0, candle_start=minute(40)),
+            True,
+            True,
+            REASONS,
+        ),
+        2: (
+            candle(close=101.0, offset_minutes=40, instrument_id=2),
+            snap(instrument_id=2, close=101.0, candle_start=minute(40)),
+            True,
+            True,
+            REASONS,
+        ),
+    }
+    summary = await manager.initial_scan(
+        session_id=1,
+        trading_date=BASE_DAY,
+        instruments=[pricey, cheap],
+        latest=latest,
+        now=minute(40),
+    )
+
+    counts = summary["counts"]
+    assert counts["evaluated"] == 2
+    assert counts["above_price_cap"] == 1
+    assert counts["qualified"] == 1
+    assert summary["ranked"] == ["TATAMOTORS"]
+    assert set(store.membership_keys) == {(1, 2)}
+    [added] = store.events  # the capped name injected no event of any kind
+    assert added.event_type == "ADDED"
+    assert added.watchlist_id == row(store, 2).id
+
+
+async def test_initial_scan_keeps_a_tracked_capped_name_on_its_state_machine(store, params):
+    # The cap is not a removal rule: a name admitted below the cap whose price
+    # has since rallied above it still goes through ``on_candle`` in the scan,
+    # so its existing state machine continues rather than the row being frozen
+    # out of every later evaluation.
+    manager = capped_manager(store, params, 2000.0)
+    await feed(manager, inst(), snap(close=1500.0, candle_start=minute(5)), offset=5, bullish=True)
+
+    summary = await manager.initial_scan(
+        session_id=1,
+        trading_date=BASE_DAY,
+        instruments=[inst()],
+        latest={
+            1: (
+                candle(close=2500.0, offset_minutes=40),
+                snap(close=2500.0, candle_start=minute(40)),
+                True,
+                True,
+                REASONS,
+            )
+        },
+        now=minute(40),
+    )
+    assert summary["counts"]["above_price_cap"] == 0
+    assert summary["counts"]["qualified"] == 1
+    assert row(store).current_state is WatchlistState.ACTIVE
 
 
 # ── §12 end of day ───────────────────────────────────────────────────────────

@@ -1837,6 +1837,12 @@ class PostgresStore(ScannerStore):
 def _config_write_params(
     params: ScannerParams, name: str, created_by: str, version: int
 ) -> dict[str, Any]:
+    # Deliberately column-by-column. ``max_price`` (the ₹ cap on tracked
+    # names) has no column and is **not** written here: it is an
+    # operator-level, env-only rule, and worker startup merges the env value
+    # into the adopted row (``_adopt_scanner_config`` in main.py) so a save
+    # from the dashboard can never move it. A future migration may add the
+    # column; until then this function must not pretend it exists.
     return {
         "name": name,
         "universe": params.universe,

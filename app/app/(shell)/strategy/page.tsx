@@ -4,6 +4,7 @@ import { filterOrbViews, parseOrbStatusFilter, type OrbStatusFilter } from "@/li
 import { longDate } from "@/lib/format";
 import { compareOrb, deriveOrb } from "@/lib/orb";
 import { ok, panel } from "@/lib/panel";
+import { sectorReadsFrom } from "@/lib/sector-reads";
 import { source } from "@/lib/source";
 import type { ReactNode } from "react";
 
@@ -34,15 +35,24 @@ export default async function StrategyPage({
   const params = await searchParams;
   const status = parseOrbStatusFilter(params.status);
 
-  const orb = await panel(() => source().orbStrategy());
+  // Anchored like the watchlist: today's opening range, or nothing — the SQL
+  // source returns no rows for a date without candles instead of falling back
+  // to the newest session with data.
+  const today = await source().activeTradingDate();
+  const [orb, sectorQuotes] = await Promise.all([
+    panel(() => source().orbStrategy(today)),
+    panel(() => source().sectorQuotes()),
+  ]);
   const rows = ok(orb) ? orb.data : [];
   const views = rows.map(deriveOrb).sort(compareOrb);
   const visible = filterOrbViews(views, status);
+  // First paint for the chips; the shared poller keeps them current.
+  const sectorReads = ok(sectorQuotes) ? sectorReadsFrom(sectorQuotes.data) : undefined;
 
   const brokeUp = views.filter((view) => view.status === "BROKE_UP").length;
   const brokeDown = views.filter((view) => view.status === "BROKE_DOWN").length;
   const confirmed = views.filter((view) => view.confirmed).length;
-  const sessionDate = rows[0]?.session_date ?? null;
+  const sessionDate = rows[0]?.session_date ?? today ?? null;
 
   return (
     <div className="space-y-4">
@@ -85,8 +95,14 @@ export default async function StrategyPage({
         {ok(orb) ? (
           views.length > 0 && visible.length === 0 && status !== "ALL" ? (
             <Empty>{ORB_FILTER_EMPTY[status]} — the counts above describe the full board.</Empty>
+          ) : views.length === 0 ? (
+            <Empty>
+              {today
+                ? `No opening-range readings for ${longDate(today)} yet — the board fills in as today's 1-minute candles arrive. A previous session's board is never shown here.`
+                : "No session with candles to read."}
+            </Empty>
           ) : (
-            <OrbTable views={visible} />
+            <OrbTable views={visible} sectorReads={sectorReads} />
           )
         ) : (
           <ErrorNote title="Strategy board unavailable" detail={orb.error} />

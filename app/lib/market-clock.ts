@@ -41,6 +41,36 @@ function istWeekday(dayNumber: number): number {
   return (((dayNumber + 4) % 7) + 7) % 7; // epoch day 0 (1970-01-01) was a Thursday
 }
 
+/**
+ * The IST calendar date (YYYY-MM-DD) of `now`. The watchlist is anchored on
+ * this: a row belongs to the IST session it was scanned in, so "today" has to
+ * flip at IST midnight (18:30 UTC), not at UTC midnight.
+ */
+export function istToday(now: Date): string {
+  return isoDate(Math.floor((now.getTime() + IST_OFFSET_MS) / DAY_MS));
+}
+
+/**
+ * Civil (Gregorian) date from an epoch day number — Howard Hinnant's
+ * civil_from_days: shift the epoch so 0000-03-01 starts an era, then read the
+ * 400-year cycle, the year-of-era and the day-of-year off it.
+ */
+function isoDate(dayNumber: number): string {
+  const z = dayNumber + 719468;
+  const era = Math.floor(z / 146097);
+  const doe = z - era * 146097; // day of era [0, 146096]
+  const yoe = Math.floor(
+    (doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365,
+  );
+  const y = yoe + era * 400;
+  const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100)); // [0, 365]
+  const mp = Math.floor((5 * doy + 2) / 153); // [0, 11], March = 0
+  const day = doy - Math.floor((153 * mp + 2) / 5) + 1; // [1, 31]
+  const month = mp < 10 ? mp + 3 : mp - 9; // [1, 12]
+  const year = y + (month <= 2 ? 1 : 0);
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
 function duration(minutes: number): string {
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;

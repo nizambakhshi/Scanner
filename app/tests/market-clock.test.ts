@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sessionClock } from "../lib/market-clock";
+import { sessionClock, istToday } from "../lib/market-clock";
 
 /**
  * The strip on the Nav is the one element an operator reads before anything they
@@ -56,4 +56,27 @@ test("Friday after the close opens again on Monday, never Saturday", () => {
   const clock = sessionClock(at("2026-10-16T11:00:00Z")); // Fri 16:30 IST
   assert.equal(clock.phase, "CLOSED");
   assert.equal(clock.countdown, "opens Mon 09:15");
+});
+
+// ── istToday: the watchlist's anchor day ────────────────────────────────────
+//
+// The watchlist shows rows for the IST *calendar* trading day and nothing
+// older, so the flip must happen at IST midnight (18:30 UTC) — a UTC-midnight
+// flip would hide this morning's session from 05:30 IST onward.
+
+test("IST midnight rolls istToday, not UTC midnight", () => {
+  assert.equal(istToday(at("2026-10-15T18:29:59Z")), "2026-10-15"); // 23:59:59 IST
+  assert.equal(istToday(at("2026-10-15T18:30:00Z")), "2026-10-16"); // 00:00:00 IST
+});
+
+test("the whole session sits on one istToday value", () => {
+  assert.equal(istToday(at("2026-10-12T03:00:00Z")), "2026-10-12"); // 08:30 warm-up
+  assert.equal(istToday(at("2026-10-12T03:45:00Z")), "2026-10-12"); // 09:15 open
+  assert.equal(istToday(at("2026-10-12T10:00:00Z")), "2026-10-12"); // 15:30 close sharp
+});
+
+test("month, year and February boundaries convert correctly", () => {
+  assert.equal(istToday(at("2026-10-31T18:30:00Z")), "2026-11-01");
+  assert.equal(istToday(at("2026-12-31T18:30:00Z")), "2027-01-01");
+  assert.equal(istToday(at("2027-02-28T18:30:00Z")), "2027-03-01"); // non-leap February
 });

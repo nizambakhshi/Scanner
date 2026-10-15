@@ -61,6 +61,23 @@ test("the sample announces itself as simulated", async () => {
   assert.match(meta.tradingDate ?? "", /^\d{4}-\d{2}-\d{2}$/);
 });
 
+test("the replay active trading date is the fixture's scripted session date", async () => {
+  // The pages anchor on activeTradingDate(); in replay that must be the date
+  // every fixture row actually belongs to — otherwise the anchor would cut
+  // the whole sample away and every page would read as empty.
+  const meta = await replaySource.meta();
+  const today = await replaySource.activeTradingDate();
+  assert.equal(today, meta.tradingDate);
+  assert.match(today ?? "", /^\d{4}-\d{2}-\d{2}$/);
+
+  const rows = await replaySource.currentWatchlist(today);
+  assert.ok(rows.length > 0, "the fixture must carry watchlist rows for its own date");
+  assert.ok(rows.every((row) => row.trading_date === today));
+
+  const feed = await replaySource.signals({ tradingDate: today, limit: 500 });
+  assert.ok(feed.every((row) => row.trading_date === today));
+});
+
 test("no broker or provider identifier appears anywhere in the sample", () => {
   // A deep scan of the shipped file, not of the mapped rows: a column the mapper
   // does not know about is exactly the thing this is guarding.

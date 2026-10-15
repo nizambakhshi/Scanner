@@ -16,7 +16,21 @@ import {
 } from "@/lib/filters";
 import { humanise, longDate, orDash } from "@/lib/format";
 import { ok, panel } from "@/lib/panel";
+import { sectorReadsFrom } from "@/lib/sector-reads";
 import { source } from "@/lib/source";
+import {
+  compareMembers,
+  compareStocks,
+  memberSortDir,
+  parseMemberSort,
+  parseSortDir,
+  parseStockSort,
+  stockSortDir,
+  toggledDir,
+  type MemberSortKey,
+  type SortDir,
+  type StockSortKey,
+} from "@/lib/sorting";
 import { buildStages, removedCount, trackedCount, weakeningCount } from "@/lib/stages";
 import type { SignalType } from "@/lib/types";
 
@@ -52,11 +66,11 @@ const BIAS_EMPTY: Record<Exclude<StockBiasFilter, "ALL">, string> = {
  * and what was removed. The three older pages (/watchlist, /stocks, /signals)
  * were one story told three times; they now redirect here.
  *
- * "Today" is not a filter here, it is the page's premise: the session row from
- * `v_session_history` supplies the date, and the watchlist and feed are read
- * with it. If that row cannot be read, the rows are cut in code to their own
- * newest trading date — a past session must never masquerade as today's.
- * Yesterday lives on the Days page.
+ * "Today" is the IST calendar date right now, not the newest row in the
+ * database: the watchlist and feed are read for that exact date, so a finished
+ * session can never masquerade as today's. Before the worker has written
+ * anything for today, the page shows an empty day with today's date — never
+ * yesterday's list. Yesterday lives on the Days page.
  */
 export default async function WatchlistPage({
   searchParams,
@@ -70,18 +84,37 @@ export default async function WatchlistPage({
   // bookmark asks for — same rule the old /signals page enforced.
   const type: SignalType | "" = parseSignalType(params.type) ?? "";
 
-  // Wave one: the session anchor and every stage source, one read per panel so a
-  // failed read breaks its own panel and nothing else.
-  const [days, coverage, scan, stocks, sparks, dailySparks] = await Promise.all([
-    panel(() => source().history(1)),
+  // Sorting, one axis per table (members: sort/dir, universe: usort/udir), so
+  // sorting the universe never disturbs the members' order and vice versa. An
+  // unknown key sorts nothing — the source's own meaningful order stands.
+  const mSort = parseMemberSort(params.sort);
+  const uSort = parseStockSort(params.usort);
+  const mDir = parseSortDir(params.dir, mSort ? memberSortDir(mSort) : "desc");
+  const uDir = parseSortDir(params.udir, uSort ? stockSortDir(uSort) : "desc");
+
+  // The anchor: the IST calendar date — a property of the clock, never of how
+  // far the worker has written. The postgres source computes it; the replay
+  // source answers with its fixture's scripted session date.
+  const today = await source().activeTradingDate();
+
+  // Wave one: the day's session row and every stage source, one read per panel
+  // so a failed read breaks its own panel and nothing else. history(3) may be
+  // all from previous sessions when today's row does not exist yet — the row
+  // for *today* is picked out below, and a missing one is a fact, not an error.
+  const [days, coverage, scan, stocks, sparks, dailySparks, sectorQuotes] = await Promise.all([
+    panel(() => source().history(3)),
     panel(() => source().coverage()),
     panel(() => source().initialScan()),
     panel(() => source().stocksOverview()),
     panel(() => source().intradaySparklines()),
     panel(() => source().dailySparklines()),
+    panel(() => source().sectorQuotes()),
   ]);
-  const session = ok(days) ? days.data[0] ?? null : null;
-  const today = session?.trading_date ?? null;
+  const todaySession = ok(days) && today ? (days.data.find((row) => row.trading_date === today) ?? null) : null;
+
+  // First paint for every sector chip on the page; the chips then keep
+  // themselves current off the shared client poller.
+  const sectorReads = ok(sectorQuotes) ? sectorReadsFrom(sectorQuotes.data) : undefined;
 
   // Wave two: today's memberships and feed, filtered at the data source when the
   // session date is known.
@@ -92,12 +125,11 @@ export default async function WatchlistPage({
   const allMembers = ok(watch) ? watch.data : [];
   const allFeed = ok(feed) ? feed.data : [];
 
-  // The belt to the source filter's braces: with no session row (or a database
-  // the view answered too broadly for), cut to the newest date actually present
-  // rather than trusting the query alone.
-  const sessionDate = today ?? newestDate([...allMembers, ...allFeed]);
-  const members = sessionDate ? allMembers.filter((row) => row.trading_date === sessionDate) : allMembers;
-  const feedRows = sessionDate ? allFeed.filter((row) => row.trading_date === sessionDate) : allFeed;
+  // The belt to the source filter's braces: cut in code too, so a view that
+  // answered too broadly (or a fixture with mixed dates) cannot leak a
+  // previous session into today's page.
+  const members = today ? allMembers.filter((row) => row.trading_date === today) : allMembers;
+  const feedRows = today ? allFeed.filter((row) => row.trading_date === today) : allFeed;
 
   // Wave three: delivery rows are keyed by the signal ids the feed read returned.
   const deliveries = await panel(() => source().deliveries(feedRows.map((row) => row.id)));
@@ -118,11 +150,15 @@ export default async function WatchlistPage({
   const overbought = stockRows.filter((row) => row.rsi_bias === "OVERBOUGHT").length;
   const neutral = stockRows.filter((row) => row.rsi_bias === "NEUTRAL").length;
 
+  // The comparator runs on copies — a view's array is never rearranged in place.
+  const membersShown = mSort ? [...visibleMembers].sort(compareMembers(mDir, mSort)) : visibleMembers;
+  const stocksShown = uSort ? [...visibleStocks].sort(compareStocks(uDir, uSort)) : visibleStocks;
+
   const stages = buildStages({
     coverage: ok(coverage) ? coverage.data : null,
     scan: ok(scan) ? scan.data : null,
     members,
-    session,
+    session: todaySession,
     signals: feedRows,
   });
 
@@ -130,20 +166,55 @@ export default async function WatchlistPage({
   const sparklines = ok(sparks) ? sparks.data : undefined;
 
   /** Every chip is also the filter for its own count, and a chip in one section
-   *  keeps the other sections' cuts — so a shared link lands on the same view. */
+   *  keeps the other sections' cuts — so a shared link lands on the same view.
+   *  The sort state rides along the same way: changing a filter never resets
+   *  how a table is ordered. */
   const hrefWith = (
-    next: { state?: WatchlistStateFilter; bias?: StockBiasFilter; type?: SignalType | "" },
+    next: {
+      state?: WatchlistStateFilter;
+      bias?: StockBiasFilter;
+      type?: SignalType | "";
+      sort?: MemberSortKey;
+      dir?: SortDir;
+      usort?: StockSortKey;
+      udir?: SortDir;
+    },
     hash: string,
   ): string => {
     const s = next.state ?? state;
     const b = next.bias ?? bias;
     const t = next.type ?? type;
+    const ms = next.sort ?? mSort;
+    const us = next.usort ?? uSort;
+    const md = next.dir ?? (ms ? mDir : null);
+    const ud = next.udir ?? (us ? uDir : null);
     const query = new URLSearchParams();
     if (s !== "ALL") query.set("state", s.toLowerCase());
     if (b !== "ALL") query.set("bias", b);
     if (t) query.set("type", t);
+    if (ms) {
+      query.set("sort", ms);
+      if (md) query.set("dir", md);
+    }
+    if (us) {
+      query.set("usort", us);
+      if (ud) query.set("udir", ud);
+    }
     const qs = query.toString();
     return `/watchlist${qs ? `?${qs}` : ""}${hash}`;
+  };
+
+  /** A members column's header link: the already-active column flips, a new
+   *  column takes its own default direction, and every other parameter — both
+   *  filters and the universe's sort — is preserved. */
+  const memberSortHref = (column: string): string => {
+    const key = column as MemberSortKey;
+    return hrefWith({ sort: key, dir: toggledDir(mDir, key === mSort, memberSortDir(key)) }, "#members");
+  };
+
+  const universeSortHref = (column: string): string => {
+    const key = column as StockSortKey;
+    return hrefWith({ usort: key, udir: toggledDir(uDir, key === uSort, stockSortDir(key)) }, "#universe");
   };
 
   return (
@@ -162,7 +233,9 @@ export default async function WatchlistPage({
         }
         aside={
           <span className="chip border-line-2 bg-surface-2 text-ink-2">
-            {sessionDate ? `${longDate(sessionDate)} · ${orDash(session?.session_status)}` : "no session yet"}
+            {today
+              ? `${longDate(today)} · ${todaySession ? orDash(todaySession.session_status) : "no session yet"}`
+              : "no session yet"}
           </span>
         }
       />
@@ -202,18 +275,29 @@ export default async function WatchlistPage({
         </div>
 
         <Panel
-          title={sessionDate ? `Members on ${longDate(sessionDate)}` : "Memberships"}
-          hint="tracked first, then by score"
+          title={today ? `Members on ${longDate(today)}` : "Memberships"}
+          hint={mSort ? "sorted — click the sorted column again to flip" : "tracked first, then by score — click a header to sort"}
         >
           {ok(watch) === false ? (
             <ErrorNote title="Watchlist unavailable" detail={watch.error} />
-          ) : visibleMembers.length === 0 && members.length > 0 && state !== "ALL" ? (
+          ) : members.length === 0 ? (
+            <Empty>
+              {today
+                ? `Nothing has qualified for ${longDate(today)} yet. Memberships appear when a completed bullish candle clears every gate; a previous session's list is never shown here.`
+                : "No memberships read — the data source could not name an active trading day."}
+            </Empty>
+          ) : visibleMembers.length === 0 && state !== "ALL" ? (
             <Empty>
               {STATE_EMPTY[state]} All {members.length} membership(s) of the day are one click away on “All
               memberships”.
             </Empty>
           ) : (
-            <WatchlistTable rows={visibleMembers} sparklines={sparklines} />
+            <WatchlistTable
+              rows={membersShown}
+              sparklines={sparklines}
+              sectorReads={sectorReads}
+              sort={{ key: mSort, dir: mDir, hrefFor: memberSortHref }}
+            />
           )}
         </Panel>
 
@@ -256,7 +340,7 @@ export default async function WatchlistPage({
                 : "No alerts yet today. If you expected one, check the health page before assuming the notification was lost — the signal row is written even when Telegram delivery fails."}
             </Empty>
           ) : (
-            <SignalsTable signals={visibleFeed} deliveries={ok(deliveries) ? deliveries.data : []} />
+            <SignalsTable signals={visibleFeed} deliveries={ok(deliveries) ? deliveries.data : []} sectorReads={sectorReads} />
           )}
         </Panel>
 
@@ -314,7 +398,12 @@ export default async function WatchlistPage({
           ) : stockRows.length > 0 && visibleStocks.length === 0 && bias !== "ALL" ? (
             <Empty>{BIAS_EMPTY[bias]} — the counts above are of the full universe.</Empty>
           ) : (
-            <StocksTable rows={visibleStocks} sparklines={ok(dailySparks) ? dailySparks.data : undefined} />
+            <StocksTable
+              rows={stocksShown}
+              sparklines={ok(dailySparks) ? dailySparks.data : undefined}
+              sectorReads={sectorReads}
+              sort={{ key: uSort, dir: uDir, hrefFor: universeSortHref }}
+            />
           )}
         </Panel>
 
@@ -329,13 +418,4 @@ export default async function WatchlistPage({
       </div>
     </div>
   );
-}
-
-/** The newest `trading_date` present in a mixed set of rows, or null. */
-function newestDate(rows: Array<{ trading_date: string | null }>): string | null {
-  let newest: string | null = null;
-  for (const row of rows) {
-    if (row.trading_date && (newest === null || row.trading_date > newest)) newest = row.trading_date;
-  }
-  return newest;
 }

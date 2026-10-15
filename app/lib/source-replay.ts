@@ -109,6 +109,21 @@ export const replaySource: ScannerSource = {
     return fixture?.worker_status ? [mapWorker(fixture.worker_status)] : [];
   },
 
+  // The fixture's scripted session stands in for "today": every row it carries
+  // belongs to that date, and replay review is anchored on it exactly as the
+  // live pages anchor on the IST calendar date. Falls back to the newest
+  // watchlist date if the exporter ever drops meta.trading_date.
+  async activeTradingDate() {
+    const fixture = load();
+    const meta = (fixture?.meta ?? {}) as Record<string, unknown>;
+    if (typeof meta.trading_date === "string") return meta.trading_date;
+    const dates = (fixture?.watchlist ?? [])
+      .map((raw) => String(raw.trading_date ?? ""))
+      .filter(Boolean)
+      .sort();
+    return dates.length > 0 ? dates[dates.length - 1] : null;
+  },
+
   async currentWatchlist(tradingDate) {
     const fixture = load();
     const wanted = dateParam(tradingDate);
@@ -183,7 +198,7 @@ export const replaySource: ScannerSource = {
   // fixture, not a real NSE opening range, and re-labelling it as one would be
   // exactly the kind of invention this project refuses. The empty state is
   // honest; the live page runs against candles_1m.
-  async orbStrategy() {
+  async orbStrategy(_tradingDate?: string | null) {
     return [];
   },
 

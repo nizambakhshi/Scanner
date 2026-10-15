@@ -503,6 +503,11 @@ export interface ScannerSource {
   meta(): Promise<SourceMeta>;
   coverage(): Promise<CoverageRow | null>;
   workerStatus(): Promise<WorkerStatusRow[]>;
+  /** The trading day the dashboard shows: the IST calendar date right now.
+   *  The watchlist and feed anchor on this exact date — rows from a finished
+   *  session never appear as if they were today's. Null only if the source
+   *  cannot name a day (the replay fixture always can: its meta date). */
+  activeTradingDate(): Promise<string | null>;
   currentWatchlist(tradingDate?: string | null): Promise<WatchlistRow[]>;
   signals(filter?: SignalFilter): Promise<SignalRow[]>;
   history(limit?: number): Promise<HistoryRow[]>;
@@ -512,9 +517,10 @@ export interface ScannerSource {
   /** The /stocks directory: every instrument the worker scans, the newest
    *  daily bar, the fundamentals and the two-timeframe RSI. */
   stocksOverview(): Promise<StockOverviewRow[]>;
-  /** The /strategy ORB board: the newest session's opening range, first
-   *  breakout and confirmation readings for every instrument. */
-  orbStrategy(): Promise<OrbRow[]>;
+  /** The /strategy ORB board: the opening range, first breakout and
+   *  confirmation readings for a single session — `tradingDate` when given,
+   *  the newest session with candles otherwise. */
+  orbStrategy(tradingDate?: string | null): Promise<OrbRow[]>;
   /** Table sparklines, `instrument_id → closes` oldest → newest. Intraday: the
    *  newest session's closes sampled per 5-minute bucket from `candles_1m`.
    *  A missing key means "no series" — the table renders a dash, never a

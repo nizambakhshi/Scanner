@@ -1,24 +1,36 @@
 import Link from "next/link";
+import { SectorChip } from "./SectorChip";
 import { SimChip } from "./SimulatedBanner";
+import { SortHeader } from "./SortHeader";
 import { Sparkline } from "./Sparkline";
 import { RsiBiasBadge, RsiStateBadge, StateBadge, rsiBandTone } from "./badges";
 import { Empty } from "./ui";
 import { clock, dateTime, multiple, orDash, pct, price, rsi, score } from "@/lib/format";
+import type { SectorReads } from "@/lib/sector-reads";
+import { sectorFor } from "@/lib/sector-map";
+import type { SortWiring } from "@/lib/sorting";
 import type { RsiBias, WatchlistRow } from "@/lib/types";
 
 /**
  * The watchlist, which is the product.
  *
- * Columns are ordered the way an operator reads: what is it, is it still
- * qualifying, how strong is it, and what the three conditions actually measured.
- * A `null` here always means "the pipeline has not computed this yet" — a
- * warming-up symbol genuinely has no EMA20, so it renders as a dash, never as 0,
- * because 0 would read as "failed the test" instead of "not tested".
+ * Columns are ordered the way an operator reads: what is it, which sector is it
+ * in, is it still qualifying, how strong is it, and what the three conditions
+ * actually measured. A `null` here always means "the pipeline has not computed
+ * this yet" — a warming-up symbol genuinely has no EMA20, so it renders as a
+ * dash, never as 0, because 0 would read as "failed the test" instead of "not
+ * tested".
+ *
+ * When the page passes `sort`, the column headers become toggle links (the
+ * rows arrive already sorted — the page owns the comparator); without it the
+ * headers are plain labels and the table keeps the source's own order.
  */
 export function WatchlistTable({
   rows,
   showSymbolLink = true,
   sparklines,
+  sectorReads,
+  sort,
 }: {
   rows: WatchlistRow[];
   showSymbolLink?: boolean;
@@ -26,6 +38,11 @@ export function WatchlistTable({
    *  renders only when the caller could read the series — a column of dashes
    *  would be noise, and a fabricated line would be worse. */
   sparklines?: Record<number, number[]>;
+  /** The sector indices' readings for first paint; the chips then keep
+   *  themselves current off the shared poller. */
+  sectorReads?: SectorReads;
+  /** Present only when the page wired sorting; headers then toggle. */
+  sort?: SortWiring;
 }) {
   if (rows.length === 0) {
     return <Empty>Nothing qualifies yet. That is a real answer, not a loading state.</Empty>;
@@ -35,28 +52,43 @@ export function WatchlistTable({
       <table className="w-full border-collapse text-[13px]">
         <thead>
           <tr className="border-b border-line">
-            <th className="th">Symbol</th>
+            <SortHeader label="Symbol" column="symbol" sort={sort} className="th" />
+            <SortHeader
+              label="Sector"
+              column="sector"
+              sort={sort}
+              className="th hidden md:table-cell"
+              title="The NIFTY sector index this symbol belongs to — the chip is green while that index is up on the day, red while down"
+            />
             {sparklines ? (
               <th className="th hidden lg:table-cell" title="Close of each traded 5-minute bucket today, oldest → newest">
                 Trend
               </th>
             ) : null}
-            <th className="th">State</th>
-            <th className="th text-right">Score</th>
-            <th className="th hidden text-right md:table-cell">Rank</th>
-            <th className="th text-right">Price</th>
-            <th className="th text-right">Day chg</th>
-            <th className="th text-right">vs VWAP</th>
-            <th className="th hidden text-right xl:table-cell">EMA spread</th>
-            <th className="th hidden text-right md:table-cell">Rel vol</th>
-            <th className="th text-right" title="Wilder RSI-14 on today's 5-minute closes, judged against the live trend — the reading the entry alert fires on">
-              RSI 5m
-            </th>
-            <th className="th hidden text-right lg:table-cell" title="Daily / weekly RSI-14 from the last completed daily bar — the nightly pair, not today's tape">
-              RSI D/W
-            </th>
-            <th className="th hidden text-right xl:table-cell">vs high</th>
-            <th className="th">Candle</th>
+            <SortHeader label="State" column="state" sort={sort} className="th" />
+            <SortHeader label="Score" column="score" sort={sort} className="th text-right" />
+            <SortHeader label="Rank" column="rank" sort={sort} className="th hidden text-right md:table-cell" />
+            <SortHeader label="Price" column="price" sort={sort} className="th text-right" />
+            <SortHeader label="Day chg" column="change" sort={sort} className="th text-right" />
+            <SortHeader label="vs VWAP" column="vwap" sort={sort} className="th text-right" />
+            <SortHeader label="EMA spread" column="ema" sort={sort} className="th hidden text-right xl:table-cell" />
+            <SortHeader label="Rel vol" column="rvol" sort={sort} className="th hidden text-right md:table-cell" />
+            <SortHeader
+              label="RSI 5m"
+              column="rsi"
+              sort={sort}
+              className="th text-right"
+              title="Wilder RSI-14 on today's 5-minute closes, judged against the live trend — the reading the entry alert fires on"
+            />
+            <SortHeader
+              label="RSI D/W"
+              column="rsidw"
+              sort={sort}
+              className="th hidden text-right lg:table-cell"
+              title="Daily / weekly RSI-14 from the last completed daily bar — the nightly pair, not today's tape. The sort reads the daily side."
+            />
+            <SortHeader label="vs high" column="high" sort={sort} className="th hidden text-right xl:table-cell" />
+            <SortHeader label="Candle" column="candle" sort={sort} className="th" />
             <th className="th">Why</th>
           </tr>
         </thead>
@@ -64,6 +96,7 @@ export function WatchlistTable({
           {rows.map((row, index) => {
             const href = row.symbol ? `/instrument/${encodeURIComponent(row.symbol)}` : null;
             const qualifying = row.current_state === "ACTIVE" || row.current_state === "REQUALIFIED";
+            const sector = sectorFor(row.symbol);
             return (
               <tr key={row.watchlist_id} className="row-hover border-b border-line last:border-0">
                 <td className="td">
@@ -83,6 +116,9 @@ export function WatchlistTable({
                       <span className="text-[11px] text-muted">{row.episode_count} episodes today</span>
                     ) : null}
                   </div>
+                </td>
+                <td className="td hidden md:table-cell">
+                  <SectorChip sector={sector} initial={sector ? (sectorReads?.[sector] ?? null) : null} />
                 </td>
                 {sparklines ? (
                   <td className="td hidden lg:table-cell">

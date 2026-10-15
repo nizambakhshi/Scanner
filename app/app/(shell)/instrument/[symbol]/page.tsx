@@ -5,9 +5,12 @@ import { SimChip } from "@/components/SimulatedBanner";
 import { RsiBiasBadge, RsiStateBadge, StateBadge, rsiBandTone } from "@/components/badges";
 import { CandleChart } from "@/components/CandleChart";
 import { EventTimeline } from "@/components/EventTimeline";
+import { SectorChip } from "@/components/SectorChip";
 import { SignalsTable } from "@/components/SignalsTable";
 import { clock, crores, dateTime, longDate, multiple, orDash, pct, price, rsi, score, shares } from "@/lib/format";
 import { ok, panel } from "@/lib/panel";
+import { sectorReadsFrom } from "@/lib/sector-reads";
+import { sectorFor } from "@/lib/sector-map";
 import { source } from "@/lib/source";
 import type { RsiBias } from "@/lib/types";
 
@@ -26,9 +29,15 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
   const clean = decodeURIComponent(symbol).slice(0, 32);
   if (!/^[\w.-]+$/.test(clean)) notFound();
 
-  const [detail, signals] = await Promise.all([
+  // Same anchor as the watchlist and feed: the active IST trading day. A
+  // membership or signal row from a finished session is not shown as if it
+  // were current.
+  const today = await source().activeTradingDate();
+
+  const [detail, signals, sectorQuotes] = await Promise.all([
     panel(() => source().instrument(clean)),
-    panel(() => source().signals({ symbol: clean, limit: 50 })),
+    panel(() => source().signals({ symbol: clean, tradingDate: today, limit: 50 })),
+    panel(() => source().sectorQuotes()),
   ]);
 
   if (ok(detail) === false) {
@@ -46,7 +55,10 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
   // A universe row that does not exist is a 404, not a page of dashes: half a
   // symbol page reads as "this one is quiet" rather than "this one is unknown".
   if (!instrument) notFound();
-  const { candles, snapshots, events, membership, overview, daily_rsi, weekly_rsi } = data;
+  const { candles, snapshots, events, membership: rawMembership, overview, daily_rsi, weekly_rsi } = data;
+  // Only the active day's membership is shown as current — a row from a
+  // finished session is older evidence, not today's state.
+  const membership = rawMembership && today && rawMembership.trading_date !== today ? null : rawMembership;
   const last = snapshots[snapshots.length - 1] ?? null;
   const firstCandle = candles[0] ?? null;
   const lastCandle = candles[candles.length - 1] ?? null;
@@ -54,6 +66,10 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
   const low = candles.reduce((best, candle) => Math.min(best, candle.low), Number.POSITIVE_INFINITY);
   const totalVolume = candles.reduce((sum, candle) => sum + candle.volume, 0);
   const rows = ok(signals) ? signals.data : [];
+  // The symbol's NIFTY sector index, and the page's one reading of that index —
+  // the chip in the heading and the chips in the feed below share both.
+  const sector = sectorFor(instrument.symbol);
+  const sectorReads = ok(sectorQuotes) ? sectorReadsFrom(sectorQuotes.data) : undefined;
   // A mapped universe row always has an overview object, but every synced field in
   // it can still be null — that is "the syncs have not covered it", which deserves
   // the note, not a grid of dashes.
@@ -81,6 +97,7 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
         aside={
           <>
             {membership ? <StateBadge state={membership.current_state} /> : null}
+            <SectorChip sector={sector} initial={sector ? (sectorReads?.[sector] ?? null) : null} />
             <SimChip value={candles.some((candle) => candle.is_simulated)} label="SIMULATED SERIES" />
             <Link href="/watchlist" className="link text-[12px]">
               Watchlist
@@ -213,7 +230,9 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
             </div>
           ) : (
             <p className="px-4 py-3 text-[12px] text-muted">
-              This symbol has no watchlist membership — it has never qualified, so there is no state to trace.
+              {rawMembership
+                ? "This symbol's watchlist membership belongs to an earlier session — only the active trading day is shown here."
+                : "This symbol has no watchlist membership — it has never qualified, so there is no state to trace."}
             </p>
           )}
           {events.length > 0 ? <EventTimeline events={events.slice(0, 20)} /> : <Empty>No recorded transitions.</Empty>}
@@ -300,7 +319,7 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
       </div>
 
       <Panel title="This symbol's signals" hint={`${rows.length} row(s)`}>
-        {ok(signals) ? <SignalsTable signals={rows} /> : <ErrorNote title="Signal feed unavailable" detail={signals.error} />}
+        {ok(signals) ? <SignalsTable signals={rows} sectorReads={sectorReads} /> : <ErrorNote title="Signal feed unavailable" detail={signals.error} />}
       </Panel>
 
       <Panel title="Indicator history" hint="the last 40 completed candles the scanner measured">
