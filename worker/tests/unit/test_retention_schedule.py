@@ -69,6 +69,40 @@ async def test_idle_maintenance_respects_the_saved_window() -> None:
     assert [key[0] for key in store.snapshots] == [2]
 
 
+async def test_a_zero_window_means_keep_forever_not_delete_everything() -> None:
+    """The staging install (Mini) accumulates history for backtests: the
+    dashboard writes 0, and the purge must skip — not clamp 0 to a one-day
+    window whose next sweep would clear almost the entire table."""
+    store = InMemoryStore()
+    store.ops_settings["retention"] = {"days": 0}
+    seed(store, age_days=400)
+
+    rt = runtime(store)
+    assert await rt._retention_days() is None
+
+    await rt._idle_maintenance()
+
+    assert len(store.candles) == 1  # 400 days old and still there
+    assert len(store.snapshots) == 1
+
+
+async def test_a_negative_window_is_also_forever_but_junk_falls_back() -> None:
+    """Only a real number <= 0 disables ageing. An unreadable value must keep
+    the old behaviour — fall back to the env default — so corruption cannot
+    quietly turn Mumbai into a never-purging database."""
+    store = InMemoryStore()
+    rt = runtime(store)
+
+    store.ops_settings["retention"] = {"days": -1}
+    assert await rt._retention_days() is None
+
+    store.ops_settings["retention"] = {"days": "junk"}
+    assert await rt._retention_days() == 3  # the env default, not "forever"
+
+    store.ops_settings.pop("retention")
+    assert await rt._retention_days() == 3
+
+
 class FixedPhaseCalendar:
     """A calendar that answers one question, so the test pins the schedule
     rather than this year's holiday file. ``_market_is_live`` reads the phase

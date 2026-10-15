@@ -999,13 +999,16 @@ class WorkerRuntime:
             return
         await self._purge_old_data()
 
-    async def _retention_days(self) -> int:
+    async def _retention_days(self) -> int | None:
         """The ageing window: the dashboard's saved value, or the env default.
 
         The dashboard owns this knob (``ops_settings['retention'].days``); the
         worker reads it at purge time rather than caching it at startup, so a
-        change on the dashboard applies without a restart. Anything unreadable
-        falls back to ``RETENTION_DAYS`` and the purge still runs.
+        change on the dashboard applies without a restart. ``None`` means keep
+        everything: the dashboard writes 0 for a database that is meant to
+        accumulate history (the staging install on the Mini), and the purge
+        then skips. Anything unreadable still falls back to ``RETENTION_DAYS``
+        so a broken setting can never silently stop ageing on its own.
         """
         fallback = int(self.settings.retention_days)
         try:
@@ -1018,11 +1021,21 @@ class WorkerRuntime:
             days = int(raw) if raw is not None else fallback  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return fallback
-        return min(30, max(1, days))
+        if days <= 0:
+            return None
+        return min(30, days)
 
     async def _purge_old_data(self) -> None:
-        """Delete candles and snapshots past retention; log what actually went."""
+        """Delete candles and snapshots past retention; log what actually went.
+
+        A ``None`` window is an explicit operator choice (0 on the dashboard),
+        not an error: the sweep is skipped and says so, once per run, so the
+        worker log alone can tell "keeping history" from "purge crashed".
+        """
         days = await self._retention_days()
+        if days is None:
+            log.info("retention_keep_forever", note="ops window is 0; nothing is deleted")
+            return
         try:
             counts = await self.store.purge_older_than(days, now=now_ist())
         except Exception as exc:  # noqa: BLE001 — retention must never stop the session

@@ -7,7 +7,9 @@ import { useEffect, useState } from "react";
  * the purge button.
  *
  * Saving `days` here is also what the worker's automatic purge reads, so there
- * is exactly one definition of "old". The button is a real DELETE with no undo,
+ * is exactly one definition of "old". `0` is a real setting — keep forever —
+ * and it is saved by its own button press that deletes nothing; the purge
+ * itself refuses a window below 1. The purge is a real DELETE with no undo,
  * hence the confirm; the response's per-table counts come from the DELETE
  * statements themselves and are journalled to `audit_logs` by the server.
  */
@@ -50,12 +52,47 @@ export function RetentionPanel() {
     };
   }, []);
 
-  async function purge() {
+  /**
+   * One button, two meanings — and they are never mixed. A window of 1..30
+   * runs the purge (confirm, then DELETE). A window of 0 saves "keep forever"
+   * through the window-only PUT: nothing is deleted, the worker's automatic
+   * purge reads the same 0 and stops ageing this database.
+   */
+  async function apply() {
     const parsed = Math.trunc(Number(days));
-    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 30) {
-      setNote({ tone: "error", text: "Days must be an integer between 1 and 30." });
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 30) {
+      setNote({ tone: "error", text: "Days must be 0 (keep forever) or an integer between 1 and 30." });
       return;
     }
+
+    if (parsed === 0) {
+      setBusy(true);
+      setNote(null);
+      try {
+        const response = await fetch("/api/ops/retention", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ days: 0 }),
+        });
+        const payload = (await response.json()) as { days: number } | { error: string };
+        if (!response.ok || "error" in payload) {
+          setNote({ tone: "error", text: "error" in payload ? payload.error : `HTTP ${response.status}` });
+          return;
+        }
+        setNote({
+          tone: "ok",
+          text: "Saved: this database keeps everything. The worker's automatic purge is off until a window of 1–30 is saved.",
+        });
+        const refreshed = await fetch("/api/ops/retention", { cache: "no-store" });
+        if (refreshed.ok) setState((await refreshed.json()) as RetentionState);
+      } catch (error) {
+        setNote({ tone: "error", text: error instanceof Error ? error.message : String(error) });
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
     const scope = symbol.trim()
       ? `candles and indicator snapshots for ${symbol.trim().toUpperCase()} older than ${parsed} day(s)`
       : `ALL candles and indicator snapshots older than ${parsed} day(s)`;
@@ -94,6 +131,8 @@ export function RetentionPanel() {
   }
 
   const last = state?.lastPurge ?? null;
+  // Mid-typing the field must not flip the button: only a complete "0" does.
+  const keepForever = days.trim() !== "" && Math.trunc(Number(days)) === 0;
 
   return (
     <div className="px-4 py-3">
@@ -102,8 +141,9 @@ export function RetentionPanel() {
           <span className="eyebrow">Ageing (days)</span>
           <input
             type="number"
-            min={1}
+            min={0}
             max={30}
+            title="0 keeps everything — the purge is off"
             value={days}
             onChange={(event) => setDays(event.target.value)}
             className="num w-24 rounded border border-line-2 bg-surface px-2 py-1.5 text-[13px] focus:border-accent focus:outline-none"
@@ -121,17 +161,22 @@ export function RetentionPanel() {
         </label>
         <button
           type="button"
-          onClick={() => void purge()}
+          onClick={() => void apply()}
           disabled={busy}
-          className="rounded border border-negative/40 bg-negative/10 px-3 py-1.5 text-[13px] font-semibold text-negative disabled:opacity-50"
+          className={
+            keepForever
+              ? "rounded border border-accent/40 bg-accent/10 px-3 py-1.5 text-[13px] font-semibold text-accent disabled:opacity-50"
+              : "rounded border border-negative/40 bg-negative/10 px-3 py-1.5 text-[13px] font-semibold text-negative disabled:opacity-50"
+          }
         >
-          {busy ? "Purging…" : "Purge now"}
+          {busy ? (keepForever ? "Saving…" : "Purging…") : keepForever ? "Keep everything" : "Purge now"}
         </button>
       </div>
       <p className="mt-2 max-w-[70ch] text-[11px] leading-snug text-muted">
         Deletes completed 1-minute candles and indicator snapshots; watchlist, signal and delivery
         history is never touched. The saved window also drives the worker&rsquo;s automatic purge at
-        session start and every 6 h. No undo — the counts below are what the DELETE reported.
+        session start and every 6 h — set it to 0 and both stop deleting: this database keeps
+        everything. No undo — the counts below are what the DELETE reported.
       </p>
       {note ? (
         <p className={`mt-2 text-[12px] ${note.tone === "ok" ? "text-positive" : "text-negative"}`}>{note.text}</p>
@@ -148,9 +193,18 @@ export function RetentionPanel() {
                   .map(([table, count]) => `${table.replace(/_/g, " ")} ${count}`)
                   .join(" · ")
               : "counts not recorded"}
+            {state?.days === 0 ? (
+              <>
+                {" "}
+                · <span className="text-accent">purging is off — keep forever</span>
+              </>
+            ) : null}
           </>
         ) : state ? (
-          <>No purge has been run from this dashboard yet. Saved window: {state.days} day(s).</>
+          <>
+            No purge has been run from this dashboard yet. Saved window:{" "}
+            {state.days === 0 ? "keep forever (purging off)" : `${state.days} day(s)`}.
+          </>
         ) : (
           "Reading the saved window…"
         )}
