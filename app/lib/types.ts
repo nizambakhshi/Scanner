@@ -110,12 +110,28 @@ export type WatchlistRow = {
   daily_rsi: number | null;
   weekly_rsi: number | null;
   rsi_bias: RsiBias;
+  /** Today's five-minute RSI and the side it puts this stock on, read from the
+   *  same snapshot row the VWAP and EMA columns come from — the board's number and
+   *  the detector's number are one stored value. `rsi_5m` is null until the session
+   *  has printed fifteen buckets; `rsi_state` is null on every candle stored before
+   *  migration 0011 ran. */
+  rsi_5m: number | null;
+  rsi_state: RsiBias;
 };
 
-/** The two-timeframe classification the operator rule defines (2026-10-12):
- *  both daily and weekly RSI above 60 → BULLISH, both below 40 → BEARISH,
- *  the 40–60 band → NEUTRAL. `null` = not classified yet (never silently NEUTRAL). */
-export type RsiBias = "BULLISH" | "BEARISH" | "NEUTRAL" | null;
+/** The three sides of the operator's RSI rule, as of 2026-10-15:
+ *  **ENTRY** — RSI below 40, the green side, the dip to act on.
+ *  **OVERBOUGHT** — RSI above 60, the red side.
+ *  **NEUTRAL** — the 40–60 band, or an extreme the other half of the rule rejects.
+ *  `null` = not measured yet (never silently NEUTRAL).
+ *
+ *  Both horizons spell the same three words: the nightly daily+weekly pair in
+ *  `stock_details.rsi_bias`, and today's five-minute reading judged against the live
+ *  trend in `indicator_snapshots.rsi_state`. The old BULLISH/BEARISH pair described
+ *  momentum and pointed the colours the wrong way; migration 0011 translated the
+ *  stored rows rather than leaving a word that meant one thing here and another
+ *  there. */
+export type RsiBias = "ENTRY" | "OVERBOUGHT" | "NEUTRAL" | null;
 
 /**
  * One row of the /stocks directory: the instrument, its latest daily bar
@@ -248,8 +264,18 @@ export type SignalType =
   | "DATA_FEED_INTERRUPTED"
   | "DATA_FEED_RECOVERED"
   | "DAILY_SCAN_COMPLETE"
+  /** Retired 2026-10-15: the two-timeframe momentum pair, whose words pointed the
+   *  colours the wrong way. Rows written under it still read, so its types stay legal. */
   | "RSI_BULLISH"
-  | "RSI_BEARISH";
+  | "RSI_BEARISH"
+  /** The two sides of the intraday entry rule, raised by the `rsi` detector:
+   *  RSI-14 below 40 in an up-trend, above 60 in a down-trend. */
+  | "RSI_ENTRY"
+  | "RSI_OVERBOUGHT"
+  /** The two level-break types. Direction is the news; which strategy saw it is
+   *  carried in `reasons` as `strategy:<name>` — see /alerts. */
+  | "BREAKOUT_UP"
+  | "BREAKDOWN";
 
 export type SignalRow = {
   id: number;
@@ -337,6 +363,12 @@ export type SnapshotRow = {
   session_high: number | null;
   session_low: number | null;
   distance_from_high_pct: number | null;
+  /** Wilder RSI-14 on this session's five-minute closes, measured on the candle that
+   *  closes a bucket — so most snapshot rows carry null by construction, not by
+   *  accident. `rsi_state` is the side that reading put the stock on once the trend
+   *  confirmed it. Both are null on candles stored before migration 0011. */
+  rsi_5m: number | null;
+  rsi_state: RsiBias;
   bullish_qualified: boolean;
   reasons: string[];
   failed_reasons: string[];

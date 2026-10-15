@@ -57,9 +57,9 @@ from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 
 from ..analytics.rsi import (
-    BEARISH,
-    BULLISH,
+    ENTRY,
     NEUTRAL,
+    OVERBOUGHT,
     classify,
     resample_and_compute,
     week_start_of,
@@ -368,8 +368,8 @@ async def run(args: argparse.Namespace) -> int:
             failed_pct=round(failed_pct, 2),
             daily_rows_written=written_daily,
             weekly_rows_written=written_weekly,
-            bias_bullish=biases[BULLISH],
-            bias_bearish=biases[BEARISH],
+            bias_entry=biases[ENTRY],
+            bias_overbought=biases[OVERBOUGHT],
             bias_neutral=biases[NEUTRAL],
             bias_not_evaluable=biases["None"],
             dry_run=bool(args.dry_run),

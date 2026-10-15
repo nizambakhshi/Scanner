@@ -12,7 +12,8 @@ const LINKS = [
   { href: "/watchlist", label: "Watchlist" },
   { href: "/stocks", label: "Stocks" },
   { href: "/strategy", label: "Strategy" },
-  { href: "/signals", label: "Alerts" },
+  { href: "/alerts", label: "Alert rules" },
+  { href: "/signals", label: "Alert feed" },
   { href: "/history", label: "Days" },
   { href: "/health", label: "Health" },
   { href: "/config", label: "Config" },
@@ -24,15 +25,15 @@ export function Nav({ email }: { email: string }) {
 
   return (
     <header className="sticky top-0 z-20 border-b border-line bg-surface/95 backdrop-blur">
-      <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-x-5 gap-y-2 px-4 py-2.5">
-        <Link href="/" className="flex items-baseline gap-2">
-          <span className="font-display text-[15px] font-bold uppercase tracking-[0.08em]">Bullish Scanner</span>
-          <span className="font-display hidden text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-2 sm:inline">
+      <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2.5">
+        <Link href="/" className="flex shrink-0 items-baseline gap-2">
+          <span className="font-serif text-[19px] italic leading-none tracking-tight">Bullish Scanner</span>
+          <span className="font-display hidden text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-2 lg:inline">
             NSE · 1m
           </span>
         </Link>
 
-        <nav className="flex flex-1 flex-wrap items-center gap-0.5">
+        <nav className="flex flex-1 flex-wrap items-center gap-x-0.5 gap-y-1">
           {LINKS.map((link) => {
             const active = link.href === "/" ? pathname === "/" : pathname.startsWith(link.href);
             return (
@@ -40,7 +41,7 @@ export function Nav({ email }: { email: string }) {
                 key={link.href}
                 href={link.href}
                 aria-current={active ? "page" : undefined}
-                className={`rounded-md border px-2.5 py-1.5 text-[13px] font-medium transition ${
+                className={`rounded-md border px-2 py-1.5 text-[13px] font-medium transition ${
                   active
                     ? "border-line bg-surface-2 text-ink"
                     : "border-transparent text-ink-2 hover:bg-hover hover:text-ink"

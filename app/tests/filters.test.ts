@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { filterOrbViews, filterStocksByBias, parseOrbStatusFilter, parseStockBiasFilter } from "@/lib/filters";
+import {
+  SIGNAL_TYPES,
+  filterOrbViews,
+  filterStocksByBias,
+  parseOrbStatusFilter,
+  parseSignalType,
+  parseStockBiasFilter,
+} from "@/lib/filters";
 import type { OrbRow, OrbView, RsiBias, StockOverviewRow } from "@/lib/types";
 
 /** Fixtures carry only what the filters read; the rest is honestly blank. */
@@ -78,8 +85,8 @@ function view(symbol: string, overrides: Partial<OrbView>): OrbView {
 }
 
 const UNIVERSE = [
-  stock("BULL1", "BULLISH"),
-  stock("BEAR1", "BEARISH"),
+  stock("ENT1", "ENTRY"),
+  stock("OVR1", "OVERBOUGHT"),
   stock("NEUT1", "NEUTRAL"),
   stock("NEUT2", "NEUTRAL"),
   stock("RAW1", null),
@@ -89,30 +96,53 @@ test("an unknown or absent bias filter shows the whole universe", () => {
   assert.equal(parseStockBiasFilter(undefined), "ALL");
   assert.equal(parseStockBiasFilter(""), "ALL");
   assert.equal(parseStockBiasFilter("wat"), "ALL");
+  // A bookmark from before the 2026-10-15 vocabulary says `?bias=BULLISH`. It selects
+  // nothing on purpose — showing the whole board is a visible miss, while quietly
+  // mapping an old word onto a new one would put a coloured claim on screen that the
+  // stored row never made.
+  assert.equal(parseStockBiasFilter("bullish"), "ALL");
+  assert.equal(parseStockBiasFilter("BEARISH"), "ALL");
   const all = filterStocksByBias(UNIVERSE, parseStockBiasFilter(undefined));
   assert.equal(all.length, UNIVERSE.length);
 });
 
 test("the bias filter parses case-insensitively and takes the first array value", () => {
-  assert.equal(parseStockBiasFilter("bullish"), "BULLISH");
-  assert.equal(parseStockBiasFilter(["BEARISH", "BULLISH"]), "BEARISH");
+  assert.equal(parseStockBiasFilter("entry"), "ENTRY");
+  assert.equal(parseStockBiasFilter(["OVERBOUGHT", "ENTRY"]), "OVERBOUGHT");
+  assert.equal(parseStockBiasFilter("neutral"), "NEUTRAL");
 });
 
 test("CLASSIFIED keeps only symbols the sync has covered — a null bias is not neutral", () => {
   const rows = filterStocksByBias(UNIVERSE, "CLASSIFIED");
   assert.deepEqual(
     rows.map((row) => row.symbol),
-    ["BULL1", "BEAR1", "NEUT1", "NEUT2"],
+    ["ENT1", "OVR1", "NEUT1", "NEUT2"],
   );
 });
 
 test("each bias filter selects exactly its own rows", () => {
   const symbols = (filter: Parameters<typeof filterStocksByBias>[1]) =>
     filterStocksByBias(UNIVERSE, filter).map((row) => row.symbol);
-  assert.deepEqual(symbols("BULLISH"), ["BULL1"]);
-  assert.deepEqual(symbols("BEARISH"), ["BEAR1"]);
+  assert.deepEqual(symbols("ENTRY"), ["ENT1"]);
+  assert.deepEqual(symbols("OVERBOUGHT"), ["OVR1"]);
   assert.deepEqual(symbols("NEUTRAL"), ["NEUT1", "NEUT2"]);
-  assert.deepEqual(symbols("ALL"), ["BULL1", "BEAR1", "NEUT1", "NEUT2", "RAW1"]);
+  assert.deepEqual(symbols("ALL"), ["ENT1", "OVR1", "NEUT1", "NEUT2", "RAW1"]);
+});
+
+test("the signal-type list accepts the current vocabulary and the retired one", () => {
+  assert.equal(parseSignalType("rsi_entry"), "RSI_ENTRY");
+  assert.equal(parseSignalType(["BREAKDOWN", "RSI_OVERBOUGHT"]), "BREAKDOWN");
+  // Rows written before 2026-10-15 must stay selectable, or the feed's own history
+  // becomes unreachable the day the vocabulary changes.
+  assert.equal(parseSignalType("RSI_BULLISH"), "RSI_BULLISH");
+  assert.equal(parseSignalType("BULLISH"), null, "that word is a bias, never a signal type");
+  assert.equal(parseSignalType(""), null);
+  assert.equal(parseSignalType(undefined), null);
+  // The endpoint's allowlist and the page's dropdown are one list: every type the
+  // detectors write has to be in it.
+  for (const type of ["BREAKOUT_UP", "BREAKDOWN", "RSI_ENTRY", "RSI_OVERBOUGHT", "BULLISH_ENTRY"]) {
+    assert.ok(SIGNAL_TYPES.includes(type as (typeof SIGNAL_TYPES)[number]), `${type} must be filterable`);
+  }
 });
 
 const VIEWS: OrbView[] = [

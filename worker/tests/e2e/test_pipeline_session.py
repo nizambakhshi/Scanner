@@ -15,16 +15,21 @@ every episode raised during a run produces its queued delivery row; the
 default 15-minute window semantics (first push through, repeats suppressed)
 are pinned in tests/unit/test_alerts.py and
 tests/unit/test_dispatcher.py.
+
+The level-break detectors (day high / ORB / VWAP) are muted for every session
+here — see :func:`build`. Armed behaviour is :mod:`tests.e2e.test_breakout_session`.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import time, timedelta
 
 import pytest
 
 from tests.conftest import BASE_DAY, SESSION_CLOSE, SESSION_OPEN, minute, tick
 from worker.alerts import AlertEngine
+from worker.analytics.breakouts import DEFAULTS, STRATEGIES, StrategiesConfig
 from worker.analytics.indicators import IndicatorRegistry
 from worker.analytics.scanner import F_INSUFFICIENT_HISTORY
 from worker.config import ScannerParams
@@ -60,6 +65,17 @@ CALENDAR = TradingCalendar(
     stale=False,
 )
 WINDOW = CALENDAR.session(BASE_DAY)
+
+
+def all_strategies_muted() -> StrategiesConfig:
+    """Every level-break detector switched off, thresholds left at their defaults.
+
+    Exported for :mod:`tests.e2e.test_breakout_session`, which builds the same
+    session with the detectors armed instead.
+    """
+    return StrategiesConfig(
+        **{key: replace(DEFAULTS[key], enabled=False) for key in STRATEGIES}
+    )
 
 
 def inst(iid: int = 1, symbol: str = "RELIANCE", previous_close: float = 100.0) -> Instrument:
@@ -165,9 +181,25 @@ async def build(
     simulation: bool = True,
     telegram: bool = False,
     cooldown: int = 0,
+    strategies: StrategiesConfig | None = None,
+    store: InMemoryStore | None = None,
 ) -> Session:
-    store = InMemoryStore()
+    """One synthetic trading day.
+
+    ``strategies=None`` means every level-break detector is *muted* here, which is
+    not the shipped configuration (that arms all three). This file's assertions are
+    hand-computed counts of watchlist signals and queued deliveries, and a breakout
+    row added to each tape would turn every one of them into arithmetic unrelated to
+    what the test pins. The detectors run armed in
+    :mod:`tests.e2e.test_breakout_session`.
+
+    ``store`` is passed in by a restart test that wants the second process to see
+    the candles the first one wrote.
+    """
     params = ScannerParams(alert_cooldown_minutes=cooldown)
+    armed = strategies if strategies is not None else all_strategies_muted()
+    if store is None:
+        store = InMemoryStore()
     await store.upsert_instruments(instruments)
     session = await store.ensure_session(BASE_DAY, SESSION_OPEN, SESSION_CLOSE)
     await store.set_session_status(session.id, "IN_PROGRESS")
@@ -198,6 +230,7 @@ async def build(
         watchlist=WatchlistManager(store=store, params=params, alerts=alerts, simulation=simulation),
         alerts=alerts,
         is_simulated=simulation,
+        strategies=armed,
     )
     return Session(pipeline, session, plans)
 
@@ -260,6 +293,49 @@ async def test_snapshot_per_candle_with_hand_computed_session_vwap_and_ema():
     assert fast_at_seed.ema_fast == pytest.approx(sum(pc for _po, pc, _v in plan[:9]) / 9.0, rel=1e-9)
     assert fast_at_seed.ema_slow is None, "EMA20 cannot exist on candle 9"
     assert s.store.snapshots[(1, minute(7))].ema_fast is None, "EMA9 must be None before its seed"
+
+
+async def test_the_five_minute_rsi_is_measured_once_per_bucket_and_stamped_on_its_candle():
+    """The operator's entry rule needs a *five-minute* RSI, and only the pipeline can
+    show that it is really measured: the reading is taken once per bucket close by the
+    indicator engine, judged once per bucket close by the detector, and both land on
+    the snapshot of the candle that produced them.
+
+    ``rising_ticks`` climbs every minute, so its RSI-14 pins near 100 — and the whole
+    point of the 2026-10-15 reversal is that a 100 in an up-trend is **NEUTRAL**: the
+    red side of the rule is an expensive print inside a *down*-trend, and the green
+    side is a dip inside an up one. Under the retired momentum reading this tape was
+    the bullish case.
+    """
+    s = await build([inst(1)], {1: rising_ticks(minutes=80)})
+    await s.connect()
+    await s.run_minutes(80)
+
+    # Wilder's recursion needs 15 closes, and a close comes every 5 minutes: the
+    # 15th bucket of this session ends at 09:15 + 74 minutes, so that is the first
+    # candle allowed to carry a reading. Not one before it.
+    first_reading_at = minute(74)
+    for offset in range(80):
+        snap = s.store.snapshots[(1, minute(offset))]
+        if minute(offset) < first_reading_at:
+            assert snap.rsi_5m is None, f"minute {offset} has no fifteenth bucket yet"
+            assert snap.rsi_state is None, "and nothing to judge from it"
+    assert s.store.snapshots[(1, first_reading_at)].rsi_5m is not None
+    assert s.store.snapshots[(1, minute(79))].rsi_5m is not None
+
+    # The reading belongs to the bucket, so the four minutes inside it repeat it
+    # rather than inventing a fresh number per minute — and the state travels with it.
+    assert s.store.snapshots[(1, minute(75))].rsi_5m == s.store.snapshots[
+        (1, minute(79))
+    ].rsi_5m, "a mid-bucket minute carries the last close's reading, not a new one"
+    last = s.store.snapshots[(1, minute(79))]
+    assert last.rsi_5m > 60.0, "a tape that only rises has an RSI pinned at the top"
+    assert last.rsi_state == "NEUTRAL", "…and an up-trend, so it is neither side of the rule"
+    assert last.rsi_state == s.pipeline.breakouts.rsi_state(1), (
+        "the row and the detector's standing verdict are the same decision, made once"
+    )
+    assert s.signals_of(SignalType.RSI_ENTRY) == []
+    assert s.signals_of(SignalType.RSI_OVERBOUGHT) == []
 
 
 async def test_nothing_is_evaluable_before_warmup_and_warmup_report_shrinks():

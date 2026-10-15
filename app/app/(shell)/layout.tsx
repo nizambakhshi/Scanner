@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { requireUserPage } from "@/lib/auth/session";
 import { source } from "@/lib/source";
 import { Nav } from "@/components/Nav";
@@ -22,8 +23,13 @@ export default async function ShellLayout({ children }: { children: React.ReactN
       <footer className="border-t border-line bg-surface">
         <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-2 px-4 py-3 text-[11px] text-muted">
           <p>
-            Read-only dashboard. It never places, modifies or cancels an order, and it cannot send a Telegram message —
-            the worker process does that, elsewhere, with credentials this app does not hold.
+            It never places, modifies or cancels an order, and it holds no broker key. It reads this database, writes
+            the two alert settings rows on{" "}
+            <Link href="/alerts" className="link">
+              Alert rules
+            </Link>
+            , and sends exactly one Telegram message: the test an operator asks for. Every real alert is raised,
+            deduped and delivered by the worker.
           </p>
           <p className="num">source: {meta.source}</p>
         </div>

@@ -78,7 +78,7 @@ export function PageHeading({
   return (
     <div className="flex flex-wrap items-end justify-between gap-3 pb-1">
       <div>
-        <h1 className="font-display text-[21px] font-semibold uppercase tracking-[0.05em]">{title}</h1>
+        <h1 className="font-serif text-[27px] italic leading-tight tracking-tight text-ink">{title}</h1>
         {subtitle ? <p className="mt-1 max-w-[70ch] text-[13px] leading-snug text-muted">{subtitle}</p> : null}
       </div>
       {aside ? <div className="flex flex-wrap items-center gap-2">{aside}</div> : null}

@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { SimChip } from "./SimulatedBanner";
-import { DeliveryBadge, SignalBadge } from "./badges";
+import { DeliveryBadge, SignalBadge, StrategyChip } from "./badges";
 import { Empty } from "./ui";
 import { clock, multiple, pct, price, score } from "@/lib/format";
 import type { DeliveryRow, SignalRow } from "@/lib/types";
@@ -73,7 +73,10 @@ export function SignalsTable({
                 </td>
                 <td className="td">
                   <SignalBadge type={signal.signal_type} />
-                  <div className="num mt-1 text-[11px] text-muted">cfg v{signal.config_version}</div>
+                  <div className="mt-1 flex flex-col gap-0.5">
+                    <StrategyChip reasons={signal.reasons} />
+                    <span className="num text-[11px] text-muted">cfg v{signal.config_version}</span>
+                  </div>
                 </td>
                 <td className="td num text-right">
                   {price(signal.price)}

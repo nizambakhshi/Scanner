@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ago, bool, clock, crores, dateTime, duration, humanise, int, isValidIst, longDate, minutesSince, multiple, num, orDash, pct, price, rowKey, rsi, score, shares, strings, toIst } from "@/lib/format";
+import { ago, bool, clock, crores, dateTime, duration, humanise, int, isValidIst, jsonRecord, longDate, minutesSince, multiple, num, orDash, pct, price, rowKey, rsi, score, shares, storedDocument, strings, toIst } from "@/lib/format";
 
 test("toIst converts an instant to Asia/Kolkata without touching the caller's timezone", () => {
   // 04:00 UTC is 09:30 IST — the session open, expressed two ways.
@@ -110,4 +110,34 @@ test("TEXT[] and JSON coercion", () => {
 test("rowKey is stable per row and cannot collide across prefixes", () => {
   assert.equal(rowKey("signal", 12, 0), "signal-12-0");
   assert.notEqual(rowKey("signal", null, 3), rowKey("candle", null, 3));
+});
+test("storedDocument reads a jsonb object as it is", () => {
+  assert.deepEqual(storedDocument({ days: 3 }), { days: 3 });
+  assert.equal(storedDocument(null), null);
+  assert.equal(storedDocument(7), null);
+  assert.equal(storedDocument(undefined), null);
+});
+
+test("storedDocument repairs the double-encoded shape the dashboard used to write", () => {
+  // `INSERT … $1::jsonb` with a pre-stringified payload stores a jsonb *string*:
+  // this is the exact shape Supabase's `ops_settings['retention']` held on 2026-10-15.
+  const doubleEncoded = "{\"days\":3}";
+  assert.equal(typeof doubleEncoded, "string");
+  assert.deepEqual(storedDocument(doubleEncoded), { days: 3 });
+});
+
+test("storedDocument refuses to invent a document out of anything else", () => {
+  assert.equal(storedDocument("3"), null, "parses, but is not the shape a caller asked for");
+  assert.equal(storedDocument('["a","b"]'), null, "an array is not a settings document");
+  assert.equal(storedDocument("{not json"), null);
+  assert.equal(storedDocument(""), null);
+  assert.equal(storedDocument("null"), null);
+});
+
+test("jsonRecord is the same reader with an empty object for the render-only callers", () => {
+  assert.deepEqual(jsonRecord({ a: 1 }), { a: 1 });
+  assert.deepEqual(jsonRecord('{"a":1}'), { a: 1 });
+  assert.deepEqual(jsonRecord(null), {});
+  assert.deepEqual(jsonRecord("nonsense"), {});
+  assert.deepEqual(jsonRecord(["a"]), {}, "an array has no keys to read");
 });

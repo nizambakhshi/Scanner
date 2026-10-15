@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { Panel, ErrorNote, PageHeading, FilterChip, Empty } from "@/components/ui";
 import { StocksTable } from "@/components/StocksTable";
 import { filterStocksByBias, parseStockBiasFilter, type StockBiasFilter } from "@/lib/filters";
@@ -10,8 +11,8 @@ export const dynamic = "force-dynamic";
  *  message never confuses "nothing in this cut" with "the universe is empty". */
 const FILTER_EMPTY: Record<Exclude<StockBiasFilter, "ALL">, string> = {
   CLASSIFIED: "No classified stocks yet — the daily/weekly sync has not covered any symbol",
-  BULLISH: "No bullish stocks right now",
-  BEARISH: "No bearish stocks right now",
+  ENTRY: "No stock has both timeframes below 40 right now",
+  OVERBOUGHT: "No stock has both timeframes above 60 right now",
   NEUTRAL: "No neutral stocks right now",
 };
 
@@ -46,8 +47,8 @@ export default async function StocksPage({
   const sparklines = ok(sparks) ? sparks.data : undefined;
 
   const classified = rows.filter((row) => row.rsi_bias !== null).length;
-  const bullish = rows.filter((row) => row.rsi_bias === "BULLISH").length;
-  const bearish = rows.filter((row) => row.rsi_bias === "BEARISH").length;
+  const entry = rows.filter((row) => row.rsi_bias === "ENTRY").length;
+  const overbought = rows.filter((row) => row.rsi_bias === "OVERBOUGHT").length;
   const neutral = rows.filter((row) => row.rsi_bias === "NEUTRAL").length;
 
   return (
@@ -57,8 +58,8 @@ export default async function StocksPage({
         subtitle={
           <>
             Every stock in the scanner&rsquo;s universe, with the daily-bar fundamentals and the RSI classification the
-            alerts run on: daily and weekly RSI-14 both above 60 is bullish, both below 40 is bearish, anything else is
-            neutral.
+            alerts run on: daily and weekly RSI-14 both below 40 is an <strong className="font-semibold text-ink">entry</strong>,
+            both above 60 is <strong className="font-semibold text-ink">overbought</strong>, anything else is neutral.
           </>
         }
       />
@@ -72,8 +73,14 @@ export default async function StocksPage({
           tone={classified > 0 ? "text-ink-2" : "text-amber"}
           active={bias === "CLASSIFIED"}
         />
-        <FilterChip href="/stocks?bias=BULLISH" label="Bullish" value={bullish} tone="text-positive" active={bias === "BULLISH"} />
-        <FilterChip href="/stocks?bias=BEARISH" label="Bearish" value={bearish} tone="text-negative" active={bias === "BEARISH"} />
+        <FilterChip href="/stocks?bias=ENTRY" label="Entry" value={entry} tone="text-positive" active={bias === "ENTRY"} />
+        <FilterChip
+          href="/stocks?bias=OVERBOUGHT"
+          label="Overbought"
+          value={overbought}
+          tone="text-negative"
+          active={bias === "OVERBOUGHT"}
+        />
         <FilterChip href="/stocks?bias=NEUTRAL" label="Neutral" value={neutral} tone="text-muted" active={bias === "NEUTRAL"} />
       </div>
 
@@ -99,8 +106,13 @@ export default async function StocksPage({
       {ok(stocks) && rows.length > 0 ? (
         <p className="px-1 text-[11px] leading-snug text-muted">
           Price and change% come from the last two synced daily bars, and the RSI readings from the daily/weekly close
-          series (Wilder RSI-14). A dash in a cell means that sync has not covered the symbol yet, not that the value is
-          zero. Open a symbol for its last seven daily and weekly RSI readings.
+          series (Wilder RSI-14) — the nightly pair, which is why an entry here means &ldquo;cheap on both timeframes at
+          yesterday&rsquo;s close&rdquo;. Today&rsquo;s five-minute RSI, the one the entry alert fires on, is on the{" "}
+          <Link href="/watchlist" className="link">
+            board
+          </Link>
+          . A dash in a cell means that sync has not covered the symbol yet, not that the value is zero. Open a symbol
+          for its last seven daily and weekly RSI readings.
         </p>
       ) : null}
     </div>

@@ -52,7 +52,9 @@ export function StocksTable({
             <th className="th text-right" title="Wilder RSI-14 resampled to ISO weeks">
               RSI W
             </th>
-            <th className="th">Bias</th>
+            <th className="th" title="Both timeframes below 40 is an entry; both above 60 is overbought">
+              Side
+            </th>
           </tr>
         </thead>
         <tbody>

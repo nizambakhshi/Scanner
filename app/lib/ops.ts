@@ -13,7 +13,7 @@
  */
 
 import { query, type Raw } from "./db";
-import { toIst } from "./format";
+import { storedDocument, toIst } from "./format";
 
 export const RETENTION_KEY = "retention";
 export const RETENTION_MIN = 1;
@@ -59,8 +59,11 @@ export async function getRetentionDays(): Promise<{ days: number; updatedAt: str
     "SELECT value, updated_at FROM ops_settings WHERE key = $1::text",
     [RETENTION_KEY],
   );
-  const raw = rows[0]?.value;
-  const days = raw && typeof raw === "object" ? clampDays((raw as Raw).days) : null;
+  // `storedDocument` rather than a typeof check: this column has held a double-encoded
+  // jsonb string since the writer below pre-stringified it, and an object-only reader
+  // displayed the default while a different number was saved.
+  const stored = storedDocument(rows[0]?.value);
+  const days = stored ? clampDays(stored.days) : null;
   return { days: days ?? RETENTION_DEFAULT, updatedAt: toIst(rows[0]?.updated_at as string | null) };
 }
 
@@ -69,7 +72,10 @@ export async function setRetentionDays(days: number): Promise<void> {
   await query(
     `INSERT INTO ops_settings (key, value) VALUES ($1::text, $2::jsonb)
      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-    [RETENTION_KEY, JSON.stringify({ days })],
+    // An object, not `JSON.stringify({ days })`: the driver binds a parameter as a
+    // value, so the stringified form was stored as a jsonb *string* — which the
+    // worker's `get_ops_setting()` read as "no row" and fell back to `RETENTION_DAYS`.
+    [RETENTION_KEY, { days }],
   );
 }
 
@@ -84,7 +90,10 @@ export async function getLastPurge(): Promise<RetentionState["lastPurge"]> {
   );
   const row = rows[0];
   if (!row) return null;
-  const value = row.new_value && typeof row.new_value === "object" ? (row.new_value as Raw) : {};
+  // Tolerant for the same reason as above: every purge row written before this fix is
+  // a double-encoded jsonb string, and a strict reader would report "never purged"
+  // for a database that has been purged repeatedly.
+  const value = storedDocument(row.new_value) ?? {};
   return {
     at: toIst(row.created_at as string | null),
     actor: typeof row.actor === "string" ? row.actor : null,
@@ -170,7 +179,7 @@ export async function runPurge(input: {
       input.actor,
       input.actorRole ?? "SUPER_ADMIN",
       symbol ?? "ALL",
-      JSON.stringify({ days, symbol, deleted }),
+      { days, symbol, deleted },
       input.requestIp ?? null,
     ],
   );

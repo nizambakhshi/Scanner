@@ -1,4 +1,4 @@
-"""Indicator engine: session VWAP, EMA(fast/slow), relative volume (spec §9).
+"""Indicator engine: session VWAP, EMA(fast/slow), relative volume, 5-minute RSI (spec §9).
 
 Every calculation here is deterministic and pure: the same candle sequence
 produces the same numbers regardless of process restarts, worker count, or
@@ -10,6 +10,11 @@ EMA initialization convention (used identically by warm-up, live processing,
 restart recovery and the tests): the first ``n`` valid closes form a simple
 moving average, that SMA becomes ``EMA_n``, and every later close uses the
 recursive form ``EMA_t = α·C_t + (1−α)·EMA_{t−1}`` with ``α = 2/(n+1)``.
+
+The RSI-14 is measured on **today's five-minute closes only** — the last 1-minute
+close of each bucket, the same partition the /strategy board builds in SQL — and
+is deliberately not seeded from yesterday's tape. An intraday entry rule has to
+describe the move that is happening now.
 """
 
 from __future__ import annotations
@@ -17,7 +22,10 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
+
+from .rsi import RSI_PERIOD, WilderRsi, closes_bucket
 
 
 @dataclass
@@ -185,18 +193,31 @@ class IndicatorValues:
     relative_volume: float | None
     candles_seen: int
     warm: bool
+    #: Wilder RSI-14 on today's five-minute closes. ``None`` until the fifteenth
+    #: bucket exists (~10:30 IST), and it holds its value through the four minutes
+    #: that do not close a bucket — the reading is a bucket measurement, not a
+    #: per-minute one.
+    rsi_5m: float | None = None
 
 
 class InstrumentIndicators:
     """Per-instrument indicator state, fed one completed candle at a time."""
 
-    def __init__(self, *, fast_period: int, slow_period: int, volume_lookback: int) -> None:
+    def __init__(
+        self,
+        *,
+        fast_period: int,
+        slow_period: int,
+        volume_lookback: int,
+        rsi_period: int = RSI_PERIOD,
+    ) -> None:
         if slow_period <= fast_period:
             raise ValueError("slow EMA period must exceed fast EMA period")
         self.fast = EmaState(period=fast_period)
         self.slow = EmaState(period=slow_period)
         self.vwap = VwapState()
         self.volume = RelativeVolumeState(lookback=volume_lookback)
+        self.rsi = WilderRsi(period=rsi_period)
         self.candles_seen = 0
         self.fast_period = fast_period
         self.slow_period = slow_period
@@ -204,12 +225,26 @@ class InstrumentIndicators:
 
     # ── live path ───────────────────────────────────────────────────────────
     def on_candle(
-        self, *, high: float, low: float, close: float, volume: int, in_current_session: bool = True
+        self,
+        *,
+        high: float,
+        low: float,
+        close: float,
+        volume: int,
+        in_current_session: bool = True,
+        candle_start: datetime | None = None,
     ) -> IndicatorValues:
         """Update state with one **completed** candle and return the values.
 
         ``in_current_session=False`` is used for historical warm-up candles:
-        they seed EMA and volume history but must not touch session VWAP.
+        they seed EMA and volume history but must not touch session VWAP, and
+        they must not enter today's RSI series either — the entry rule is about
+        the move happening now.
+
+        ``candle_start`` is what tells a five-minute bucket close from the four
+        minutes inside it. Omit it and the RSI simply stops advancing (EMA, VWAP
+        and volume still update), which keeps an older caller honest rather than
+        silently bucketing on the wrong minute.
         """
         if close <= 0:
             raise ValueError(f"candle close must be positive, got {close}")
@@ -217,6 +252,8 @@ class InstrumentIndicators:
             raise ValueError("candle volume must be nonnegative")
         if in_current_session:
             self.vwap.update(high, low, close, volume)
+            if candle_start is not None and closes_bucket(candle_start):
+                self.rsi.update(close)
         self.fast.update(close)
         self.slow.update(close)
         self.volume.push(volume)
@@ -239,11 +276,17 @@ class InstrumentIndicators:
             relative_volume=self.volume.value(),
             candles_seen=self.candles_seen,
             warm=warm,
+            rsi_5m=self.rsi.value,
         )
 
     def reset_session_vwap(self) -> None:
-        """Called at each session boundary; EMA/volume history is preserved."""
+        """Called at each session boundary; EMA/volume history is preserved.
+
+        The five-minute RSI resets with the VWAP rather than with the EMA: both
+        measure *this* session, and yesterday's tape is not today's dip.
+        """
         self.vwap.reset()
+        self.rsi = WilderRsi(period=self.rsi.period)
 
     # ── warm-up + recovery ──────────────────────────────────────────────────
     def seed(self, candles: Iterable[Any], *, session_candles: bool = False) -> int:
@@ -251,7 +294,7 @@ class InstrumentIndicators:
 
         ``session_candles=True`` only when the candles belong to the session
         currently being evaluated (restart recovery); historical days seed EMA
-        and the volume baseline but never today's VWAP.
+        and the volume baseline but never today's VWAP or today's RSI.
         """
         count = 0
         for candle in candles:
@@ -261,6 +304,7 @@ class InstrumentIndicators:
                 close=float(candle.close),
                 volume=int(candle.volume),
                 in_current_session=session_candles,
+                candle_start=getattr(candle, "candle_start", None),
             )
             count += 1
         return count
@@ -274,6 +318,7 @@ class InstrumentIndicators:
             "slow": self.slow.to_dict(),
             "vwap": self.vwap.to_dict(),
             "volume": self.volume.to_dict(),
+            "rsi": self.rsi.to_dict(),
             "candles_seen": self.candles_seen,
         }
 
@@ -287,6 +332,8 @@ class InstrumentIndicators:
         engine.fast = EmaState.from_dict(payload["fast"])
         engine.slow = EmaState.from_dict(payload["slow"])
         engine.vwap = VwapState.from_dict(payload["vwap"])
+        if payload.get("rsi"):
+            engine.rsi = WilderRsi.from_dict(payload["rsi"])
         for volume in payload["volume"].get("history", []):
             engine.volume.push(int(volume))
         engine.candles_seen = int(payload.get("candles_seen", 0))

@@ -84,11 +84,24 @@ class SignalType(StrEnum):
     DATA_FEED_INTERRUPTED = "DATA_FEED_INTERRUPTED"
     DATA_FEED_RECOVERED = "DATA_FEED_RECOVERED"
     DAILY_SCAN_COMPLETE = "DAILY_SCAN_COMPLETE"
-    # Two-timeframe RSI transitions (operator rule 2026-10-12): both daily and
-    # weekly RSI above 60 → BULLISH, both below 40 → BEARISH. Raised only when
-    # the pair *changes* state, never repeatedly for a standing state.
+    # RSI transitions, renamed 2026-10-15 when the operator reversed the reading:
+    # below 40 is the green, actionable side (``RSI_ENTRY``) and above 60 is the
+    # expensive side (``RSI_OVERBOUGHT``). Both names are raised by two horizons —
+    # the nightly daily+weekly pair at session start and the intraday five-minute
+    # detector — and ``reasons`` says which. ``RSI_BULLISH`` / ``RSI_BEARISH`` are
+    # retired: nothing raises them, but the rows they wrote stay readable on the
+    # signals board, so the enum and the database CHECK keep them legal.
     RSI_BULLISH = "RSI_BULLISH"
     RSI_BEARISH = "RSI_BEARISH"
+    RSI_ENTRY = "RSI_ENTRY"
+    RSI_OVERBOUGHT = "RSI_OVERBOUGHT"
+    # Level breaks (operator feature 2026-10-14). Two types, not six: the
+    # direction is what an alert *is* (up over a level / down under one), while
+    # the strategy that saw it — day break, opening range, VWAP — is data, so it
+    # travels in ``reasons[0]`` as ``strategy:<name>`` and is what the per-strategy
+    # cooldown keys on. See ``worker/analytics/breakouts.py``.
+    BREAKOUT_UP = "BREAKOUT_UP"
+    BREAKDOWN = "BREAKDOWN"
 
 
 class DeliveryStatus(StrEnum):
@@ -405,6 +418,12 @@ class IndicatorSnapshot:
     failed_reasons: tuple[str, ...]
     data_quality: DataQuality
     warming_up: bool
+    #: Wilder RSI-14 on the session's five-minute closes (None for the first ~75
+    #: minutes) and the state the /alerts rsi detector judged from it: ENTRY /
+    #: OVERBOUGHT / NEUTRAL. Kept together with the candle it was measured on so the
+    #: number the dashboard colours and the number that alerted are one reading.
+    rsi_5m: float | None = None
+    rsi_state: str | None = None
     score: float | None = None
     rank: int | None = None
     is_simulated: bool = False

@@ -364,7 +364,12 @@ class ScannerStore(ABC):
 
     @abstractmethod
     async def last_pushed_signal_at(
-        self, instrument_id: int, signal_type: str, *, since: datetime
+        self,
+        instrument_id: int,
+        signal_type: str,
+        *,
+        since: datetime,
+        reason: str | None = None,
     ) -> datetime | None:
         """Newest signal for this (instrument, type) that reached a channel.
 
@@ -372,6 +377,12 @@ class ScannerStore(ABC):
         received. Signal rows are written even when their delivery is suppressed,
         so a plain "last signal" query lets a continuously qualifying instrument
         mute itself forever — one alert, then silence for the rest of the day.
+
+        ``reason`` narrows the match to rows whose ``reasons`` array contains it.
+        Breakout alerts share one signal type across three strategies with three
+        different cooldowns, so a VWAP alert must not be muted by an opening-range
+        alert of the same minute — ``strategy:<name>`` is the discriminator
+        (:func:`worker.analytics.breakouts.strategy_reason`).
         """
 
     @abstractmethod

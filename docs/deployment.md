@@ -56,8 +56,12 @@ scanner-worker
 
 The Angel One credentials are the API key, client code, TOTP secret, PIN and a refresh
 token. The refresh token is minted once through the broker portal and rotated by the
-worker; it never leaves that process. The Telegram bot token and chat id are used only by
-the dispatcher in the same process.
+worker; it never leaves that process. The Telegram bot token and chat id reach the worker
+by either route: `TELEGRAM_*` in this process's environment, or the pair an operator saves
+on the dashboard's Alerts page, which lands in `ops_settings['telegram']` and is re-read
+every 60 seconds and applied inside the running session. A complete stored pair wins over
+the environment; an empty or half-filled row does not, and a stored pair switched off on
+the page is blanked rather than left configured. Only the worker dispatches real alerts.
 
 ---
 
@@ -103,11 +107,29 @@ export AUTH_ADMIN_PASSWORD_HASH="scrypt$1f2e…$9c7a…"
 ```
 
 Vercel stores values literally, so this only bites when running the dashboard from a
-terminal or a `.env`-sourcing script.
+terminal or a `.env`-sourcing script. There is a second, quieter version of the same trap:
+**`next dev`/`next start` runs every variable that also appears in a `.env*` file through
+dotenv-expand, including one supplied on the command line**, and an un-braced `$1a2b`
+there is treated as a variable reference and replaced with nothing. Proven locally
+2026-10-15: `AUTH_ADMIN_PASSWORD_HASH='scrypt$…$…' next dev` in a directory whose
+`.env.local` names that same key made the server bootstrap the admin row with the literal
+string `scrypt`, so every sign-in 401'd while the env file itself read correctly. It cannot
+happen on Vercel (no `.env*` files there, so nothing is expanded), but locally the fix is to
+put the value in the env file rather than the command line, or escape the dollars as `\$`.
 
-**No `ANGEL_*`, `TELEGRAM_*`, TOTP or PIN variable belongs on the Vercel project.** The app
-has no code path that reads them, and adding them to the project would put broker
-credentials in a build log's reach for no capability gained.
+**No `ANGEL_*`, TOTP or PIN variable belongs on the Vercel project**, and the app has no
+code path that reads them; adding them would put broker credentials in a build log's reach
+for no capability gained.
+
+`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are the one deliberate exception, added on
+2026-10-14. They are *optional* on the dashboard: `app/lib/env.ts` reads them only as the
+fallback behind the pair stored in `ops_settings['telegram']`, so the **Send test** button
+on the Alerts page can prove a credential that was never typed into the page. Setting them
+is not required — leaving them unset is the more conservative choice, and the page then
+says the credential lives "nowhere yet" until you save one. A token is never returned by
+any view, rendered into HTML, written to an audit row or logged: only its 12-character
+sha256 fingerprint is shown, which is the same fingerprint the worker logs when it adopts
+a pair. Nothing on the dashboard can place, modify or cancel an order.
 
 ### Network
 
@@ -125,7 +147,15 @@ assuming the connection is healthy.
 3. Confirm the whole screen still shows the simulated banner when the sample is being
    served, and shows no banner when the database is.
 4. Sign out and reload a page: it must return to `/login`, and `/api/watchlist` must be
-   `401`.
+   `401`. So must `/api/strategies`, `/api/telegram` and `/api/telegram/test` — the last
+   one is the only endpoint in the app that talks to an outside service, and it never runs
+   without a signed-in session.
+5. Open **Alert rules**. It renders the three level detectors with the numbers the worker
+   ships, one Telegram panel, and a note about what a save does. Changing a threshold and
+   saving must leave the page reading back the new value, and must put exactly one
+   `ops_settings['alert_strategies']` row and one `audit_logs` row with the field-level
+   diff in the database. The worker picks it up within a minute — its log says
+   `alert_strategies_adopted`, never a copy of the token.
 
 Vercel's deployment protection (or any auth in front of the app) is optional; the app
 authenticates itself. Do not disable it and expose the API to the open internet with a

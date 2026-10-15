@@ -1,27 +1,38 @@
-"""Unit tests for the daily/weekly Wilder RSI (worker.analytics.rsi).
+"""Unit tests for the RSI module: Wilder series, streaming reader, both rules.
 
 Every expected number is hand-computed from the definition stated in the
 module docstring — never copied from the implementation's own output — so a
 formula change fails here instead of silently rewriting the operator's bias.
+
+The two rules the module carries are tested apart, because they answer different
+questions: ``classify`` is the nightly daily+weekly pair, and ``classify_intraday``
+is this morning's five-minute reading beside the live trend.
 """
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from worker.analytics.rsi import (
-    BEARISH,
-    BEARISH_THRESHOLD,
-    BULLISH,
-    BULLISH_THRESHOLD,
+    ENTRY,
+    ENTRY_THRESHOLD,
     NEUTRAL,
+    OVERBOUGHT,
+    OVERBOUGHT_THRESHOLD,
+    TREND_DOWN,
+    TREND_MIXED,
+    TREND_UP,
+    WilderRsi,
     classify,
+    classify_intraday,
+    closes_bucket,
     latest_rsi,
     resample_and_compute,
     resample_weekly,
+    trend_state,
     week_start_of,
     wilder_rsi,
 )
@@ -169,19 +180,19 @@ def test_resample_and_compute_alignment():
 # ── classification ──────────────────────────────────────────────────────────
 
 
-def test_classify_both_above_sixty_is_bullish():
-    assert classify(65.0, 70.0) == BULLISH
-    assert classify(BULLISH_THRESHOLD + 0.0001, 99.0) == BULLISH
+def test_classify_both_above_sixty_is_overbought():
+    assert classify(65.0, 70.0) == OVERBOUGHT
+    assert classify(OVERBOUGHT_THRESHOLD + 0.0001, 99.0) == OVERBOUGHT
 
 
-def test_classify_both_below_forty_is_bearish():
-    assert classify(30.0, 35.0) == BEARISH
-    assert classify(1.0, BEARISH_THRESHOLD - 0.0001) == BEARISH
+def test_classify_both_below_forty_is_entry():
+    assert classify(30.0, 35.0) == ENTRY
+    assert classify(1.0, ENTRY_THRESHOLD - 0.0001) == ENTRY
 
 
 def test_classify_mixed_disagreement_is_neutral():
-    assert classify(65.0, 50.0) == NEUTRAL  # daily says up, weekly does not
-    assert classify(45.0, 30.0) == NEUTRAL  # weekly says down, daily does not
+    assert classify(65.0, 50.0) == NEUTRAL  # daily says expensive, weekly does not
+    assert classify(45.0, 30.0) == NEUTRAL  # weekly says entry, daily does not
 
 
 def test_classify_exact_thresholds_are_neutral():
@@ -195,3 +206,131 @@ def test_classify_missing_value_is_not_neutral():
     assert classify(None, 70.0) is None
     assert classify(70.0, None) is None
     assert classify(None, None) is None
+
+
+# ── the live trend ──────────────────────────────────────────────────────────
+
+
+def test_trend_needs_both_direction_conditions_to_agree():
+    # Up = close above VWAP *and* fast EMA above slow: the scanner's own two tests,
+    # and the relative-volume gate is deliberately not one of them.
+    assert trend_state(close=101.0, vwap=100.0, ema_fast=100.5, ema_slow=100.0) == TREND_UP
+    assert trend_state(close=99.0, vwap=100.0, ema_fast=99.5, ema_slow=100.0) == TREND_DOWN
+
+
+def test_trend_eyes_are_a_chop_not_a_direction():
+    # Above VWAP with the EMAs crossed down, and the mirror image: neither side.
+    assert trend_state(close=101.0, vwap=100.0, ema_fast=99.0, ema_slow=100.0) == TREND_MIXED
+    assert trend_state(close=99.0, vwap=100.0, ema_fast=100.0, ema_slow=99.0) == TREND_MIXED
+
+
+def test_trend_missing_input_is_mixed_not_up():
+    # A young session has no VWAP. Inventing a direction from the parts that do
+    # exist would let an unjudgeable candle be reported as an entry.
+    assert trend_state(close=101.0, vwap=None, ema_fast=100.0, ema_slow=99.0) == TREND_MIXED
+    assert trend_state(close=None, vwap=100.0, ema_fast=100.0, ema_slow=99.0) == TREND_MIXED
+
+
+# ── the intraday entry rule ─────────────────────────────────────────────────
+
+
+def test_intraday_oversold_in_an_uptrend_is_the_entry():
+    assert classify_intraday(35.0, TREND_UP) == ENTRY
+
+
+def test_intraday_overbought_in_a_downtrend_is_the_warning():
+    assert classify_intraday(65.0, TREND_DOWN) == OVERBOUGHT
+
+
+def test_intraday_extreme_without_a_trend_is_not_news():
+    # The whole point of pairing them: an oversold print in a falling tape is a
+    # falling tape, and the same print in a chop is nobody's entry.
+    assert classify_intraday(35.0, TREND_DOWN) == NEUTRAL
+    assert classify_intraday(35.0, TREND_MIXED) == NEUTRAL
+    assert classify_intraday(65.0, TREND_UP) == NEUTRAL
+    assert classify_intraday(65.0, TREND_MIXED) == NEUTRAL
+
+
+def test_intraday_band_is_neutral_and_exact_levels_are_not_extremes():
+    assert classify_intraday(50.0, TREND_UP) == NEUTRAL
+    assert classify_intraday(40.0, TREND_UP) == NEUTRAL  # "below 40" is strict
+    assert classify_intraday(60.0, TREND_DOWN) == NEUTRAL
+
+
+def test_intraday_no_reading_is_none_rather_than_neutral():
+    # A young session has fewer than fifteen buckets. NEUTRAL is an observation the
+    # alert engine acts on; None means the rule was never given a number.
+    assert classify_intraday(None, TREND_UP) is None
+
+
+def test_intraday_thresholds_are_the_ones_the_operator_edited():
+    # The levels on /alerts are what the rule reads; the shipped 40/60 are defaults,
+    # not constants baked into the verdict.
+    assert classify_intraday(55.0, TREND_UP, entry_threshold=60.0) == ENTRY
+    assert classify_intraday(55.0, TREND_DOWN, entry_threshold=60.0) == NEUTRAL
+    assert classify_intraday(75.0, TREND_DOWN, overbought_threshold=70.0) == OVERBOUGHT
+    # …and the same reading under the untouched defaults.
+    assert classify_intraday(55.0, TREND_UP) == NEUTRAL
+    assert classify_intraday(75.0, TREND_DOWN) == OVERBOUGHT
+
+
+# ── bucket boundaries ───────────────────────────────────────────────────────
+
+
+def test_bucket_close_is_the_fifth_minute_of_the_session():
+    # 09:15 opens the session on an exact five-minute boundary, so the candle that
+    # *starts* at :19 is the one whose close ends the 09:15–09:20 bucket.
+    assert closes_bucket(datetime(2026, 10, 15, 9, 19))
+    assert closes_bucket(datetime(2026, 10, 15, 9, 24))
+    assert closes_bucket(datetime(2026, 10, 15, 15, 29))  # the day's last one
+    assert not closes_bucket(datetime(2026, 10, 15, 9, 15))
+    assert not closes_bucket(datetime(2026, 10, 15, 9, 20))
+    assert not closes_bucket(datetime(2026, 10, 15, 9, 19, 30))  # not a whole minute
+
+
+# ── streaming RSI agrees with the series ────────────────────────────────────
+
+
+def test_streaming_rsi_equals_the_batch_series():
+    # Two implementations of one formula is how a dashboard starts disagreeing with
+    # itself, so the running value must land on the series' last entry every step.
+    closes = [100, 101, 100.5, 102, 101.5, 103, 104, 103.5, 105, 104.5]
+    closes += [105, 106, 105.5, 107, 106.5, 108, 107.5, 109, 110, 108]
+    engine = WilderRsi()
+    series = wilder_rsi(closes)
+    for index, close in enumerate(closes):
+        running = engine.update(close)
+        assert running == series[index]
+    assert engine.value == series[-1]
+    assert engine.observations == len(closes)
+
+
+def test_streaming_rsi_is_silent_until_the_period_is_full():
+    engine = WilderRsi(period=3)
+    assert [engine.update(close) for close in (10, 11, 12)] == [None, None, None]
+    assert engine.update(11) is not None
+
+
+def test_streaming_rsi_checkpoint_round_trips():
+    closes = list(range(100, 140)) + [135 - i for i in range(10)]
+    engine = WilderRsi()
+    for close in closes:
+        engine.update(float(close))
+    restored = WilderRsi.from_dict(engine.to_dict())
+    assert restored.value == engine.value
+    # The next close must follow the *history*, not the checkpoint's tail window:
+    # re-seeding from the tail alone would silently restart the recursion.
+    nxt = 121.0
+    assert restored.update(nxt) == engine.update(nxt)
+    assert restored.to_dict() == engine.to_dict()
+
+
+def test_streaming_rsi_rejects_a_bad_close():
+    with pytest.raises(ValueError):
+        WilderRsi().update(0.0)
+    with pytest.raises(ValueError):
+        WilderRsi().update(-1.0)
+    with pytest.raises(ValueError):
+        WilderRsi().update(float("nan"))
+    with pytest.raises(ValueError):
+        WilderRsi(period=1)

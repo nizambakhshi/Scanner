@@ -35,11 +35,14 @@ const text = (value: unknown): string | null => (value === null || value === und
 const time = (value: unknown): string | null => toIst(value as string | Date | null);
 const optionalInt = (value: unknown): number | null => (value === null || value === undefined ? null : int(value));
 
-const BIAS_VALUES = new Set(["BULLISH", "BEARISH", "NEUTRAL"]);
-/** The stored classification, or null. Anything unexpected (a stray string, a
- *  half-written row) must degrade to "not classified" — the UI turns a non-null
- *  bias into a coloured claim about the stock, so it may only accept the three
- *  the sync is allowed to write. */
+const BIAS_VALUES = new Set(["ENTRY", "OVERBOUGHT", "NEUTRAL"]);
+/** Which side of the entry rule a stored RSI fact puts a stock on, or null.
+ *  Anything unexpected (a stray string, a half-written row, the retired
+ *  BULLISH/BEARISH pair) degrades to "not classified" — the UI turns a non-null
+ *  side into a coloured claim about the stock, so it may only accept the three the
+ *  sync and the detector are allowed to write. Migration 0011 translates the old
+ *  pair in place, so a row that still spells BULLISH here is a row from a database
+ *  this build has not been told how to read. */
 const bias = (value: unknown): RsiBias => {
   const raw = value === null || value === undefined ? "" : String(value);
   return BIAS_VALUES.has(raw) ? (raw as RsiBias) : null;
@@ -123,6 +126,8 @@ export function mapWatchlist(row: Raw): WatchlistRow {
     daily_rsi: num(row.daily_rsi),
     weekly_rsi: num(row.weekly_rsi),
     rsi_bias: bias(row.rsi_bias),
+    rsi_5m: num(row.rsi_5m),
+    rsi_state: bias(row.rsi_state),
   };
 }
 
@@ -243,6 +248,8 @@ export function mapSnapshot(row: Raw): SnapshotRow {
     session_high: num(row.session_high),
     session_low: num(row.session_low),
     distance_from_high_pct: num(row.distance_from_high_pct),
+    rsi_5m: num(row.rsi_5m),
+    rsi_state: bias(row.rsi_state),
     bullish_qualified: bool(row.bullish_qualified),
     reasons: strings(row.reasons),
     failed_reasons: strings(row.failed_reasons),

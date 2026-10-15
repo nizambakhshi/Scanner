@@ -21,6 +21,7 @@ structlog pipeline redacts them.
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -1109,6 +1110,7 @@ class PostgresStore(ScannerStore):
                 vwap, ema9, ema20, average_volume20, relative_volume,
                 intraday_change_pct, distance_from_vwap_pct, ema_spread_pct,
                 session_high, session_low, distance_from_high_pct,
+                rsi_5m, rsi_state,
                 bullish_qualified, reasons, failed_reasons, data_quality_status,
                 warming_up, score, "rank", config_version, is_simulated
             ) VALUES (
@@ -1116,7 +1118,8 @@ class PostgresStore(ScannerStore):
                 %(previous_close)s, %(vwap)s, %(ema9)s, %(ema20)s, %(average_volume20)s,
                 %(relative_volume)s, %(intraday_change_pct)s, %(distance_from_vwap_pct)s,
                 %(ema_spread_pct)s, %(session_high)s, %(session_low)s,
-                %(distance_from_high_pct)s, %(bullish_qualified)s, %(reasons)s,
+                %(distance_from_high_pct)s, %(rsi_5m)s, %(rsi_state)s,
+                %(bullish_qualified)s, %(reasons)s,
                 %(failed_reasons)s, %(data_quality_status)s, %(warming_up)s,
                 %(score)s, %(rank)s, %(config_version)s, %(is_simulated)s
             )
@@ -1135,6 +1138,8 @@ class PostgresStore(ScannerStore):
                 session_high = EXCLUDED.session_high,
                 session_low = EXCLUDED.session_low,
                 distance_from_high_pct = EXCLUDED.distance_from_high_pct,
+                rsi_5m = EXCLUDED.rsi_5m,
+                rsi_state = EXCLUDED.rsi_state,
                 bullish_qualified = EXCLUDED.bullish_qualified,
                 reasons = EXCLUDED.reasons,
                 failed_reasons = EXCLUDED.failed_reasons,
@@ -1163,6 +1168,8 @@ class PostgresStore(ScannerStore):
             "session_high": _r(snapshot.session_high),
             "session_low": _r(snapshot.session_low),
             "distance_from_high_pct": _r(snapshot.distance_from_high_pct),
+            "rsi_5m": _r(snapshot.rsi_5m, 4),
+            "rsi_state": snapshot.rsi_state,
             "bullish_qualified": snapshot.bullish_qualified,
             "reasons": list(snapshot.reasons),
             "failed_reasons": list(snapshot.failed_reasons),
@@ -1399,8 +1406,13 @@ class PostgresStore(ScannerStore):
         signal_type: str,
         *,
         since: datetime,
+        reason: str | None = None,
     ) -> datetime | None:
         statuses = [status.value for status in ALERTED_DELIVERY_STATUSES]
+        # The reasons filter is a separate predicate rather than an f-string
+        # fragment so the parameter stays bound: `%(reason)s IS NULL` short-circuits
+        # for every non-breakout alert, and the array containment only runs when a
+        # strategy discriminator was supplied.
         sql = """
             SELECT MAX(s.event_timestamp) AS at
             FROM signals s
@@ -1409,12 +1421,14 @@ class PostgresStore(ScannerStore):
               AND s.signal_type = %(signal_type)s
               AND s.event_timestamp >= %(since)s
               AND d.delivery_status = ANY(%(statuses)s)
+              AND (%(reason)s::text IS NULL OR s.reasons @> ARRAY[%(reason)s]::text[])
         """
         params = {
             "instrument_id": instrument_id,
             "signal_type": signal_type,
             "since": since,
             "statuses": statuses,
+            "reason": reason,
         }
         async with self._pool.connection() as conn, conn.transaction():
             row = await (await conn.execute(sql, params)).fetchone()
@@ -1685,15 +1699,31 @@ class PostgresStore(ScannerStore):
         return deleted
 
     async def get_ops_setting(self, key: str) -> dict[str, object] | None:
+        """One ``ops_settings`` document, as the dict every caller expects.
+
+        A row stored as a jsonb *string* is decoded rather than reported absent.
+        That shape is not hypothetical: the dashboard's ``INSERT … $n::jsonb`` with a
+        pre-stringified payload produced it, and Supabase's ``retention`` row held it
+        until this was fixed on both sides. Returning ``None`` for it would be the
+        quieter, worse failure — every reader treats ``None`` as "the page never
+        touched this", so a knob the operator moved would be silently ignored while
+        the dashboard displayed the new value.
+        """
         async with self._pool.connection() as conn, conn.transaction():
             row = await (
                 await conn.execute(
                     "SELECT value FROM ops_settings WHERE key = %s", (key,)
                 )
             ).fetchone()
-        if row is None or not isinstance(row["value"], dict):
+        value: object = row["value"] if row is not None else None
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(value, dict):
             return None
-        return dict(row["value"])
+        return dict(value)
 
     # ── test helper ─────────────────────────────────────────────────────────
     async def truncate_all(self, *, allow: bool = False) -> None:

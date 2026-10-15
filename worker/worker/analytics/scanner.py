@@ -18,6 +18,7 @@ from datetime import datetime
 from ..config import ScannerParams
 from ..models import Candle, DataQuality, IndicatorSnapshot
 from .indicators import IndicatorValues
+from .rsi import TREND_MIXED, trend_state
 
 # ── reason codes ────────────────────────────────────────────────────────────
 R_CLOSE_ABOVE_VWAP = "CLOSE_ABOVE_VWAP"
@@ -76,9 +77,30 @@ class EvaluationResult:
     data_quality: DataQuality
     warming_up: bool
     evaluable: bool
+    #: Wilder RSI-14 on today's five-minute closes, and which side of its own trend
+    #: the candle finished on. The *state* is not here on purpose: judging it needs
+    #: the entry/overbought thresholds the operator edits on /alerts, and the
+    #: detector that holds them (:class:`~worker.analytics.breakouts.BreakoutTracker`)
+    #: is the single judge. Two implementations of one rule is how a page ends up
+    #: disagreeing with the alert it just sent.
+    rsi_5m: float | None = None
+    trend: str = TREND_MIXED
     detail: dict[str, object] = field(default_factory=dict)
 
-    def to_snapshot(self, *, trading_date, config_version: int, is_simulated: bool) -> IndicatorSnapshot:
+    def to_snapshot(
+        self,
+        *,
+        trading_date,
+        config_version: int,
+        is_simulated: bool,
+        rsi_state: str | None = None,
+    ) -> IndicatorSnapshot:
+        """The row to store for this candle.
+
+        ``rsi_state`` is not this object's own judgement: the tracker that owns the
+        operator's 40/60 thresholds decides it and the pipeline passes the verdict
+        through, so the stored state and the alert that just fired cannot differ.
+        """
         return IndicatorSnapshot(
             instrument_id=self.instrument_id,
             trading_date=trading_date,
@@ -96,6 +118,8 @@ class EvaluationResult:
             session_high=self.session_high,
             session_low=self.session_low,
             distance_from_high_pct=self.distance_from_high_pct,
+            rsi_5m=self.rsi_5m,
+            rsi_state=rsi_state,
             bullish_qualified=self.bullish,
             reasons=self.reasons,
             failed_reasons=self.failed_reasons,
@@ -217,6 +241,17 @@ class Scanner:
             "evaluable": evaluable,
         }
 
+        # The trend side this candle finished on, from the same two direction tests
+        # as the conditions above and for the same reason: an RSI reading means
+        # opposite things in an uptrend and a downtrend. Price validity is honoured
+        # by ``trend_state`` returning MIXED when a value is missing.
+        trend = trend_state(
+            close=close if price_valid else None,
+            vwap=vwap,
+            ema_fast=ema_fast,
+            ema_slow=ema_slow,
+        )
+
         return EvaluationResult(
             instrument_id=candle.instrument_id,
             symbol=context.symbol,
@@ -239,6 +274,8 @@ class Scanner:
             data_quality=candle.data_quality,
             warming_up=warming_up,
             evaluable=evaluable,
+            rsi_5m=indicators.rsi_5m,
+            trend=trend,
             detail=detail,
         )
 

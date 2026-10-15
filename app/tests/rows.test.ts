@@ -123,31 +123,63 @@ test("candle, event, history and instrument mappers normalise their own rows", (
   assert.equal(instrument.is_nifty500, true);
 });
 
-test("the watchlist row carries the two-timeframe RSI, nulls stay null", () => {
+test("the watchlist row carries both RSI horizons, nulls stay null", () => {
   const withRsi = mapWatchlist({
     current_state: "ACTIVE",
     daily_rsi: "63.2500",
     weekly_rsi: null,
-    rsi_bias: "BULLISH",
+    rsi_bias: "OVERBOUGHT",
+    rsi_5m: "38.4000",
+    rsi_state: "ENTRY",
   });
   assert.equal(withRsi.daily_rsi, 63.25);
   assert.equal(withRsi.weekly_rsi, null);
-  assert.equal(withRsi.rsi_bias, "BULLISH");
+  assert.equal(withRsi.rsi_bias, "OVERBOUGHT");
+  // The intraday reading arrives as NUMERIC like every other stored number.
+  assert.equal(withRsi.rsi_5m, 38.4);
+  assert.equal(withRsi.rsi_state, "ENTRY");
 
   // No stock_details row (or a half-written one) must read as "not classified".
   const without = mapWatchlist({ current_state: "ACTIVE", rsi_bias: null });
   assert.equal(without.daily_rsi, null);
   assert.equal(without.rsi_bias, null);
+  // A source that does not select the intraday columns at all — the replay sample —
+  // must leave them absent, not invent a zero the board would colour.
+  assert.equal(without.rsi_5m, null);
+  assert.equal(without.rsi_state, null);
 });
 
-test("a bias is only ever the three stored classifications", () => {
+test("a classification is only ever the three stored words, on either horizon", () => {
   const ok = mapStockOverview({ instrument_id: 1, rsi_bias: "NEUTRAL" });
   assert.equal(ok.rsi_bias, "NEUTRAL");
   // A stray string must degrade to null, not become a coloured claim on screen.
-  const stray = mapStockOverview({ instrument_id: 1, rsi_bias: "bullish" });
+  const stray = mapStockOverview({ instrument_id: 1, rsi_bias: "entry" });
   assert.equal(stray.rsi_bias, null);
   const empty = mapStockOverview({ instrument_id: 1, rsi_bias: "" });
   assert.equal(empty.rsi_bias, null);
+  // Migration 0011 translates BULLISH/BEARISH in place, so a row that still spells
+  // them comes from a database this build has not been told how to read. Refuse it.
+  const retired = mapStockOverview({ instrument_id: 1, rsi_bias: "BULLISH" });
+  assert.equal(retired.rsi_bias, null);
+  // The same gate governs the intraday state on a watchlist or snapshot row.
+  assert.equal(mapWatchlist({ current_state: "ACTIVE", rsi_state: "BEARISH" }).rsi_state, null);
+  assert.equal(mapSnapshot({ id: 1, rsi_state: "OVERBOUGHT" }).rsi_state, "OVERBOUGHT");
+});
+
+test("a snapshot carries the intraday RSI the detector fired on", () => {
+  const snapshot = mapSnapshot({
+    id: 3,
+    instrument_id: "41",
+    rsi_5m: "61.7500",
+    rsi_state: "OVERBOUGHT",
+  });
+  assert.equal(snapshot.rsi_5m, 61.75);
+  assert.equal(snapshot.rsi_state, "OVERBOUGHT");
+  // Before the first bucket closes there is no reading and no verdict; the board
+  // shows a dash and the alert rule shows nothing, so null must survive the map.
+  const early = mapSnapshot({ id: 4, instrument_id: "41" });
+  assert.equal(early.rsi_5m, null);
+  assert.equal(early.rsi_state, null);
 });
 
 test("the stock overview maps NUMERIC strings and keeps missing values missing", () => {
@@ -171,7 +203,7 @@ test("the stock overview maps NUMERIC strings and keeps missing values missing",
     data_start: "2002-01-01",
     daily_rsi: "63.2500",
     weekly_rsi: "61.8400",
-    rsi_bias: "BULLISH",
+    rsi_bias: "OVERBOUGHT",
     rsi_as_of: "2026-10-09",
   });
   assert.equal(row.instrument_id, 41);
@@ -182,7 +214,7 @@ test("the stock overview maps NUMERIC strings and keeps missing values missing",
   assert.equal(row.listing_date, "1995-11-29");
   assert.equal(row.daily_rsi, 63.25);
   assert.equal(row.weekly_rsi, 61.84);
-  assert.equal(row.rsi_bias, "BULLISH");
+  assert.equal(row.rsi_bias, "OVERBOUGHT");
 
   const bare = mapStockOverview({ instrument_id: 7, symbol: "NEWCO" });
   assert.equal(bare.close, null);

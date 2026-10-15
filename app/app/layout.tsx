@@ -1,32 +1,19 @@
 import type { Metadata } from "next";
-import { Barlow, Barlow_Semi_Condensed, IBM_Plex_Mono } from "next/font/google";
 import { themeInitScript } from "@/lib/theme";
 import "./globals.css";
 
 /**
- * Three faces, one job each: Barlow reads as prose, Barlow Semi Condensed is the
- * stamp on every label and legend, and IBM Plex Mono carries every number with
- * tabular figures so columns align as scales. Self-hosted by next/font, so the
- * board never waits on a font CDN.
+ * Three faces, one job each — the same set the Cadence board runs on: IBM Plex Sans
+ * reads as prose and as the stamp on every label and legend, IBM Plex Mono carries
+ * every number with tabular figures so columns align as scales, and Instrument Serif
+ * italic is the voice — the wordmark and the page title, nowhere else.
+ *
+ * They are self-hosted from `public/fonts` as latin woff2 through `@font-face` in
+ * `globals.css`, not pulled through `next/font/google`: the build then needs no
+ * network, and the board needs no font CDN at view time. The CSP in
+ * `next.config.ts` allows `font-src 'self' data:` only, which is exactly what this
+ * arrangement satisfies.
  */
-const barlow = Barlow({
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
-  variable: "--font-barlow",
-  display: "swap",
-});
-const barlowCondensed = Barlow_Semi_Condensed({
-  subsets: ["latin"],
-  weight: ["500", "600", "700"],
-  variable: "--font-barlow-condensed",
-  display: "swap",
-});
-const plexMono = IBM_Plex_Mono({
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
-  variable: "--font-plex-mono",
-  display: "swap",
-});
 
 export const metadata: Metadata = {
   title: "Bullish Scanner — operator dashboard",
@@ -43,15 +30,17 @@ export const metadata: Metadata = {
  * it by necessity — a page that demands a session before it can create one is a
  * redirect loop.
  *
- * `data-theme` starts as the night board and the inline script in the head may
- * flip it to daylight before the first paint, so the stored choice never arrives as
- * a flash: an operator reloading mid-session should get the same board back
- * instantly. The attribute is also on the server HTML so a browser with JS disabled
- * still gets a coherent (default) palette rather than unstyled tokens.
+ * `data-theme` is the single switch the stylesheet hangs the palette on, exactly as
+ * on the Cadence board: the server HTML carries the night board, the inline script
+ * in the head may overwrite it before the first paint from the stored choice or the
+ * operating system's preference, and the attribute stays on the HTML so a browser
+ * with JS disabled still gets a coherent (default) palette rather than unstyled
+ * tokens. An operator reloading mid-session gets the same board back instantly,
+ * never a repaint as the page arrives.
  */
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" data-theme="dark" className={`${barlow.variable} ${barlowCondensed.variable} ${plexMono.variable}`}>
+    <html lang="en" data-theme="dark" suppressHydrationWarning>
       <head>
         {/*
           A plain inline script, deliberately not `next/script`: with

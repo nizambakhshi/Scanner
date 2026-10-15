@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { SimChip } from "./SimulatedBanner";
 import { Sparkline } from "./Sparkline";
-import { RsiBiasBadge, StateBadge } from "./badges";
+import { RsiBiasBadge, RsiStateBadge, StateBadge, rsiBandTone } from "./badges";
 import { Empty } from "./ui";
 import { clock, dateTime, multiple, orDash, pct, price, rsi, score } from "@/lib/format";
 import type { RsiBias, WatchlistRow } from "@/lib/types";
@@ -49,7 +49,10 @@ export function WatchlistTable({
             <th className="th text-right">vs VWAP</th>
             <th className="th text-right">EMA spread</th>
             <th className="th text-right">Rel vol</th>
-            <th className="th text-right" title="Daily / weekly RSI-14 from the last completed daily bar">
+            <th className="th text-right" title="Wilder RSI-14 on today's 5-minute closes, judged against the live trend — the reading the entry alert fires on">
+              RSI 5m
+            </th>
+            <th className="th text-right" title="Daily / weekly RSI-14 from the last completed daily bar — the nightly pair, not today's tape">
               RSI D/W
             </th>
             <th className="th text-right">vs high</th>
@@ -131,6 +134,18 @@ export function WatchlistTable({
                     {multiple(row.relative_volume)}
                   </span>
                 </td>
+                <td className={`td num text-right ${rsiBandTone(row.rsi_5m)}`}>
+                  {row.rsi_5m === null ? (
+                    <span className="text-muted" title="No five-minute RSI reading on this snapshot — the session is younger than the warmup or the worker restarted">
+                      —
+                    </span>
+                  ) : (
+                    rsi(row.rsi_5m)
+                  )}
+                  <div className="mt-0.5 flex justify-end">
+                    <RsiStateBadge state={row.rsi_state} />
+                  </div>
+                </td>
                 <td className={`td num text-right ${biasTone(row.rsi_bias)}`}>
                   {row.daily_rsi === null && row.weekly_rsi === null ? (
                     <span className="text-muted" title="No daily/weekly RSI synced for this symbol yet">
@@ -185,10 +200,12 @@ function tone(value: number | null | undefined): string {
   return "text-ink-2";
 }
 
-/** The RSI cell carries the classification's tone; an unclassified row stays muted. */
+/** The nightly classification carries the tone of its own column; an unclassified
+ *  row stays at the inherited colour because "the sync has not covered it" is not a
+ *  verdict in either direction. */
 function biasTone(bias: RsiBias): string {
-  if (bias === "BULLISH") return "text-positive";
-  if (bias === "BEARISH") return "text-negative";
+  if (bias === "ENTRY") return "text-positive";
+  if (bias === "OVERBOUGHT") return "text-negative";
   return "";
 }
 

@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from .alerts import AlertEngine
+from .analytics.breakouts import BreakoutEvent, BreakoutTracker, StrategiesConfig
 from .analytics.indicators import IndicatorRegistry
 from .analytics.scanner import ScanContext, Scanner
 from .config import ScannerParams
@@ -38,7 +39,12 @@ from .models import (
     WorkerHeartbeat,
 )
 from .persistence.store import ScannerStore, SessionRow
-from .timeutils import SessionWindow, TradingCalendar, to_ist
+from .timeutils import (
+    SESSION_CANDLE_SLOTS,
+    SessionWindow,
+    TradingCalendar,
+    to_ist,
+)
 from .watchlist import WatchlistManager
 
 log = get_logger(__name__)
@@ -68,6 +74,11 @@ class PipelineCounters:
     warm_instruments: int = 0
     outages: int = 0
     stale_seconds_total: float = 0.0
+    #: Level breaks the detectors found, and how many of them survived idempotency
+    #: and cooldown. The gap between the two is the operator's evidence that a
+    #: strategy is running and being suppressed, rather than not running at all.
+    breakouts_detected: int = 0
+    breakouts_alerted: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +89,8 @@ class PipelineCounters:
             "warm_instruments": self.warm_instruments,
             "outages": self.outages,
             "stale_seconds_total": round(self.stale_seconds_total, 1),
+            "breakouts_detected": self.breakouts_detected,
+            "breakouts_alerted": self.breakouts_alerted,
         }
 
 
@@ -99,6 +112,13 @@ class ScannerPipeline:
     feed_status: FeedStatus = FeedStatus.DISCONNECTED
     counters: PipelineCounters = field(default_factory=PipelineCounters)
     initial_scan_completed: bool = False
+    #: The level-break strategies the operator armed (`ops_settings['alert_strategies']`,
+    #: :func:`worker.analytics.breakouts.parse_strategies`). Supplied by the runtime at
+    #: session start; absent means the shipped defaults.
+    strategies: StrategiesConfig | None = field(default=None, repr=False)
+    #: Runs the day-break / opening-range / VWAP detectors over every candle of
+    #: the whole subscribed universe, not only the watchlist.
+    breakouts: BreakoutTracker | None = field(default=None, repr=False)
     _token_index: dict[str, int] = field(default_factory=dict, repr=False)
     _last_tick_at: dict[int, datetime] = field(default_factory=dict, repr=False)
     _last_exchange_ts: dict[int, datetime] = field(default_factory=dict, repr=False)
@@ -114,6 +134,8 @@ class ScannerPipeline:
 
     def __post_init__(self) -> None:
         self.scanner = Scanner(self.params)
+        self.strategies = self.strategies or StrategiesConfig()
+        self.breakouts = BreakoutTracker(strategies=self.strategies, window=self.window)
         for instrument in self.instruments.values():
             if instrument.instrument_token:
                 self._token_index[instrument.instrument_token] = instrument.id
@@ -276,10 +298,22 @@ class ScannerPipeline:
         return due
 
     async def flush_session(self, now: datetime) -> list[Candle]:
-        """Session close: flush the forming minute, nothing more."""
+        """Session close: flush the forming minute, then the day's last ORB bucket.
+
+        The closing bucket of the session has no following candle to finalize it,
+        and the /strategy board reads it because it queries a finished day. Flushing
+        the tracker here is what makes the live alerts agree with that board.
+        """
         remaining = self.engine.finalize_all(now)
         if remaining:
             await self.process_candles(remaining, now=now)
+        if self.feed_status not in OUTAGE_STATUSES:
+            events = self.breakouts.flush()
+            self.counters.breakouts_detected += len(events)
+            for event in events:
+                instrument = self.instruments.get(event.instrument_id)
+                if instrument is not None:
+                    await self._raise_breakout(event, instrument=instrument)
         return remaining
 
     async def process_candles(self, candles: list[Candle], *, now: datetime) -> None:
@@ -309,6 +343,7 @@ class ScannerPipeline:
             close=candle.close,
             volume=candle.volume,
             in_current_session=in_session,
+            candle_start=candle.candle_start,
         )
         if in_session:
             count = self._session_candle_count.get(candle.instrument_id, 0) + 1
@@ -340,10 +375,28 @@ class ScannerPipeline:
             session_high=self._session_high.get(candle.instrument_id),
             session_low=self._session_low.get(candle.instrument_id),
         )
+        # The detectors are folded in *before* the snapshot is written, not after it:
+        # the RSI rule's verdict belongs on this candle's row, and judging once and
+        # reading the same verdict back is what keeps the snapshot, the board and the
+        # Telegram line from telling three versions of one event. A feed we cannot
+        # trust does not enter the detectors at all — a flat minute would build a
+        # level and a streak out of nothing — so the row carries the last verdict the
+        # trustworthy tape produced, the same treatment its EMA and VWAP get.
+        events: list[BreakoutEvent] = []
+        if self.feed_status not in OUTAGE_STATUSES:
+            events = self.breakouts.on_candle(
+                candle,
+                symbol=instrument.symbol,
+                vwap=values.vwap,
+                relative_volume=values.relative_volume,
+                rsi_5m=values.rsi_5m,
+                trend=result.trend,
+            )
         snapshot = result.to_snapshot(
             trading_date=self.window.trading_date,
             config_version=self.params.config_version,
             is_simulated=self.is_simulated,
+            rsi_state=self.breakouts.rsi_state(candle.instrument_id),
         )
         snapshot_id = await self.store.upsert_indicator_snapshot(snapshot)
         self.counters.snapshots_written += 1
@@ -360,6 +413,12 @@ class ScannerPipeline:
         # still stored, the snapshot is still stored, but no alert is minted.
         if self.feed_status in OUTAGE_STATUSES:
             return
+        # Level breaks are judged for every instrument the feed reaches, not only
+        # the ones that qualified: a day high on a stock the scanner never liked is
+        # still a day high, and the operator asked for the whole F&O universe.
+        self.counters.breakouts_detected += await self._raise_breakouts(
+            events, instrument=instrument
+        )
         outcome = await self.watchlist.on_candle(
             session_id=self.session.id,
             trading_date=self.window.trading_date,
@@ -374,6 +433,98 @@ class ScannerPipeline:
         )
         if outcome.signaled:
             self.counters.signals_raised += 1
+
+    async def _raise_breakouts(
+        self, events: list[BreakoutEvent], *, instrument: Instrument
+    ) -> int:
+        """Alert on what the detectors found; returns how many they found.
+
+        The detector itself is pure and holds no database handle — this is the only
+        place its output meets the alert engine. It is a separate method from the
+        judging call because the snapshot has to be written with the RSI verdict
+        first, and one call per candle is the whole reason the two can agree.
+        """
+        for event in events:
+            await self._raise_breakout(event, instrument=instrument)
+        return len(events)
+
+    async def _raise_breakout(self, event: BreakoutEvent, *, instrument: Instrument) -> None:
+        if self.alerts is None:
+            return
+        outcome = await self.alerts.raise_breakout(
+            event,
+            session_id=self.session.id,
+            company_name=instrument.company_name,
+            previous_close=instrument.previous_close,
+        )
+        # ``created`` rather than ``notified`` because a cooldown-suppressed or
+        # simulated alert is still a row the operator can read on the board; the
+        # gap between detected and created is the dedupe working, and it belongs
+        # in the log line rather than in a counter that looks like a bug.
+        if outcome.created:
+            self.counters.breakouts_alerted += 1
+        log.info(
+            "breakout",
+            **event.to_log_dict(),
+            created=outcome.created,
+            suppressed=outcome.suppressed_reason,
+        )
+
+    async def recover_breakouts(self) -> dict[str, Any]:
+        """Rebuild today's levels from the candles this database already holds.
+
+        A worker that comes up at 11:40 — after a crash, a deploy, or a Mini that
+        slept — has never seen today's opening range. Without this the ORB detector
+        stays mute until tomorrow and the first new high after the restart is
+        reported as a day break against a level made of afternoon candles. The
+        minutes are already stored, so replaying them through the same code rebuilds
+        exactly what the live tape would have built, silently: those alerts were
+        judged when they happened.
+        """
+        stored = await self.store.load_completed_candles(
+            list(self.instruments),
+            until=self.window.close_at,
+            limit_per_instrument=SESSION_CANDLE_SLOTS,
+        )
+        folded = 0
+        instruments = 0
+        for instrument_id, candles in stored.items():
+            instrument = self.instruments.get(instrument_id)
+            if instrument is None:
+                continue
+            rows: list[tuple[Candle, float | None]] = []
+            typical_volume = 0.0
+            volume_total = 0
+            for candle in candles:
+                # Session VWAP from stored bars, the same Σ(TP·V)/ΣV the indicator
+                # engine maintains live. Only today's minutes count toward it.
+                if candle.trading_date == self.window.trading_date and candle.volume > 0:
+                    typical_volume += candle.typical_price * candle.volume
+                    volume_total += candle.volume
+                rows.append((candle, typical_volume / volume_total if volume_total else None))
+            count = self.breakouts.recover(rows, symbol=instrument.symbol)
+            if count:
+                folded += count
+                instruments += 1
+        summary = {
+            "instruments_recovered": instruments,
+            "candles_folded": folded,
+            "levels": self.breakouts.armed_summary(),
+        }
+        if folded:
+            log.info("breakout_levels_recovered", **summary)
+        return summary
+
+    def reconfigure_breakouts(self, strategies: StrategiesConfig) -> dict[str, Any]:
+        """Apply an edited strategy document mid-session, keeping today's levels.
+
+        The thresholds, cooldowns and Telegram switches change; the opening range
+        and the day high do not, because they are facts about the tape rather than
+        facts about the configuration.
+        """
+        self.strategies = strategies
+        self.breakouts.reconfigure(strategies)
+        return self.breakouts.armed_summary()
 
     def latest_evaluations(
         self,

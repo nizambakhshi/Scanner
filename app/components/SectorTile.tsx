@@ -11,8 +11,11 @@ import type { SectorQuoteRow } from "@/lib/types";
  * on are at most one candle behind the tape, but sectors are context, not
  * signals — a 5-second poll over a 13-row JSON endpoint is cheap and keeps the
  * board's server render independent of this tile's health. A quote older than
- * STALE_MS is dimmed rather than hidden: an empty chip would be
- * indistinguishable from a chip that was never fetched.
+ * STALE_MS keeps its border and loses its liveness — the edge goes dashed and the
+ * figure goes quiet — rather than vanishing or fading to an invisible outline: an
+ * empty chip would be indistinguishable from a chip that was never fetched, and a
+ * board at 08:00 is entirely stale quotes until the open, which is exactly when the
+ * operator reads it.
  */
 
 const POLL_MS = 5_000;
@@ -75,7 +78,7 @@ export function SectorTile({ initial }: { initial: SectorQuoteRow[] | null }) {
             Last refresh failed ({error}) — showing the previous values.
           </span>
         ) : (
-          <>Live from the broker feed · refreshed every 5 s · a dimmed chip means the quote is stale</>
+          <>Live from the broker feed · refreshed every 5 s · a dashed chip means the quote is stale</>
         )}
       </p>
     </div>
@@ -88,21 +91,36 @@ function SectorChip({ row, now }: { row: SectorQuoteRow; now: number }) {
   const up = (row.change_pct ?? 0) >= 0;
   return (
     <div
-      className={`rounded border px-2.5 py-2 ${stale ? "border-line bg-surface-2 opacity-60" : "border-line"}`}
+      className={`rounded-md border px-2.5 py-2 transition-colors ${
+        stale
+          ? "border-dashed border-line-2 bg-surface-2 text-muted"
+          : "border-line-2 bg-surface hover:border-ink-2/60"
+      }`}
       title={
         row.source_updated_at
           ? `${row.display_name} · quote at ${row.source_updated_at}`
           : `${row.display_name} · no quote flushed yet`
       }
     >
-      <p className="truncate text-[11px] uppercase tracking-wide text-muted">{row.display_name}</p>
+      <p className="truncate text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">
+        {row.display_name}
+      </p>
       {row.last_price === null ? (
-        <p className="num mt-0.5 text-[13px] text-muted">waiting…</p>
+        <p className="num mt-1 text-[13px] text-muted">waiting…</p>
       ) : (
-        <div className="mt-0.5 flex items-baseline justify-between gap-2">
-          <span className="num text-[13px] font-semibold">{row.last_price.toFixed(2)}</span>
+        <div className="mt-1 flex items-baseline justify-between gap-1.5">
+          <span className="num text-[13px] font-medium">{row.last_price.toFixed(2)}</span>
+          {/* The number that says which way the sector moved is the one worth reading
+              at a glance, so it gets the heaviest cut of the face that carries every
+              figure here, plus a tint of its own direction. */}
           <span
-            className={`num text-[12px] ${row.change_pct === null ? "text-muted" : up ? "text-positive" : "text-negative"}`}
+            className={`num rounded px-1 py-px text-[13px] font-bold ${
+              row.change_pct === null
+                ? "text-muted"
+                : up
+                  ? "bg-positive/12 text-positive"
+                  : "bg-negative/12 text-negative"
+            }`}
           >
             {row.change_pct === null
               ? "—"

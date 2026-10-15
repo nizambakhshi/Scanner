@@ -3,12 +3,19 @@
  *
  * Two rules the rest of the file exists to enforce:
  *
- * 1. This app is a *reader*. It needs a PostgreSQL connection and a session
- *    secret, and nothing else. Broker credentials (`ANGEL_*`), the Telegram bot
- *    token and the TOTP seed belong to the worker process, which runs elsewhere.
- *    A dashboard that can place no trades and send no messages should not be able
- *    to read the keys that could; if this list ever grows with an `ANGEL_` name,
- *    that is a design mistake, not a missing variable.
+ * 1. This app reads a database and authenticates its own operator. Broker
+ *    credentials (`ANGEL_*`) and the TOTP seed stay out of it entirely: the
+ *    dashboard places no order and must never be able to.
+ *
+ *    Telegram is the one deliberate exception, made on 2026-10-14 when the
+ *    operator asked for alert configuration and a Send-test button on the
+ *    dashboard. `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` are read here as a
+ *    *fallback* for `ops_settings['telegram']`, which is the primary source and
+ *    what the worker obeys. The token is used to send exactly one kind of message
+ *    (the test the operator asked for), is never returned by any view function,
+ *    and never reaches HTML, an audit row, an API response or a log line. The
+ *    allowlist test in `tests/config.test.ts` records that decision instead of
+ *    pretending the exception is not there.
  * 2. No value is ever logged. `missingRequired()` returns *names*, which are safe
  *    to show an operator; the values never leave this module.
  */
@@ -48,6 +55,14 @@ export function buildEnv(source: Record<string, string | undefined>) {
     sessionHours: Math.min(Math.max(int(source.AUTH_SESSION_HOURS, 12), 1), 168),
     appUrl: str(source.APP_URL, "http://localhost:3000"),
     nodeEnv: str(source.NODE_ENV, "development"),
+
+    /**
+     * Telegram *fallback* credentials — see rule 1 in the header. The database row
+     * is primary; these exist so a deployment that already passes the pair to the
+     * worker can press Send-test without copying anything into the page.
+     */
+    telegramBotToken: str(source.TELEGRAM_BOT_TOKEN),
+    telegramChatId: str(source.TELEGRAM_CHAT_ID),
   } as const;
 }
 
