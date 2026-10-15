@@ -25,6 +25,7 @@ from ..models import (
     Channel,
     DailyCandle,
     DeliveryStatus,
+    DiscoverySnapshotRow,
     FeedStatus,
     IndicatorSnapshot,
     Instrument,
@@ -87,6 +88,9 @@ class InMemoryStore(ScannerStore):
         # it and having to re-merge on every read.
         self.daily_candles: dict[tuple[int, date], DailyCandle] = {}
         self.weekly_candles: dict[tuple[int, date], WeeklyCandle] = {}
+        # daily_discovery_snapshots keyed by (trading_date, instrument), the
+        # table's primary key: an upsert replaces the day's verdict in place.
+        self.discovery_snapshots: dict[tuple[date, int], DiscoverySnapshotRow] = {}
         self.stock_details: dict[int, dict[str, object]] = {}
         self.connected = False
 
@@ -242,6 +246,15 @@ class InMemoryStore(ScannerStore):
     async def load_weekly_candles(self, instrument_id: int) -> list[WeeklyCandle]:
         rows = [row for (iid, _), row in self.weekly_candles.items() if iid == instrument_id]
         return sorted(rows, key=lambda row: row.week_start)
+
+    async def upsert_discovery_snapshots(self, rows: list[DiscoverySnapshotRow]) -> int:
+        for row in rows:
+            self.discovery_snapshots[(row.trading_date, row.instrument_id)] = row
+        return len(rows)
+
+    async def load_discovery_snapshots(self, trading_date: date) -> list[DiscoverySnapshotRow]:
+        rows = [row for (day, _), row in self.discovery_snapshots.items() if day == trading_date]
+        return sorted(rows, key=lambda row: row.instrument_id)
 
     async def update_stock_technicals(self, rows: list[StockTechnicals]) -> int:
         for row in rows:

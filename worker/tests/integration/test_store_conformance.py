@@ -35,6 +35,7 @@ from worker.models import (
     DailyCandle,
     DataQuality,
     DeliveryStatus,
+    DiscoverySnapshotRow,
     IndicatorSnapshot,
     Instrument,
     NotificationDelivery,
@@ -551,6 +552,104 @@ async def test_stock_technicals_and_alert_bias_round_trip(store: Any, instrument
     # Anti-drift parity: setting a bias for a row that does not exist is a
     # silent no-op (the SQL UPDATE matches zero rows), never an error.
     await store.set_last_alert_bias(instrument_id + 4242, "OVERBOUGHT")
+
+
+# ── daily discovery snapshots (Stage 1 persistence, migration 0012) ──────────
+
+
+def make_discovery_row(
+    iid: int, day: date, *, group: str = "STRONG_BULLISH", **changes: Any
+) -> DiscoverySnapshotRow:
+    base = DiscoverySnapshotRow(
+        trading_date=day,
+        instrument_id=iid,
+        group=group,
+        trend_class="STRONG_BULL",
+        liquidity_class="HIGH",
+        volatility_class="MEDIUM",
+        relative_strength=87.5,
+        eligibility=True,
+        reason="ema20>ema50>ema200, fresh high inside 5 sessions",
+        indicators={"ema20": 101.5, "adx14": 32.25, "fresh_high": True, "roc12": None},
+        completeness=0.75,
+        config_version=3,
+    )
+    return replace(base, **changes)
+
+
+async def test_discovery_snapshot_upsert_is_idempotent_per_day(
+    store: Any, instrument_id: int
+) -> None:
+    # One row per (trading_date, instrument): a re-run of the discovery must
+    # overwrite the day's verdict in place. The replay below re-classifies the
+    # same stock on the same day — the excluded re-run is the final word.
+    day = date(2026, 10, 9)
+    assert await store.upsert_discovery_snapshots([make_discovery_row(instrument_id, day)]) == 1
+
+    replayed = make_discovery_row(
+        instrument_id,
+        day,
+        group="EXCLUDED",
+        eligibility=False,
+        reason="stale_last_bar:2026-09-29",
+    )
+    assert await store.upsert_discovery_snapshots([replayed]) == 1
+
+    rows = await store.load_discovery_snapshots(day)
+    assert len(rows) == 1, "same (day, instrument) must be one row, not two"
+    assert rows[0].group == "EXCLUDED"
+    assert rows[0].eligibility is False
+    assert rows[0].reason == "stale_last_bar:2026-09-29"
+
+
+async def test_discovery_snapshot_round_trips_indicators_jsonb_and_classes(
+    store: Any, instrument_id: int
+) -> None:
+    # Every column is its own fact: the class vocabulary, the jsonb fold with a
+    # None hole in it (an indicator that did not exist is stored as null, never
+    # a fabricated zero), and the day records that identify the run.
+    day = date(2026, 10, 9)
+    await store.upsert_discovery_snapshots([make_discovery_row(instrument_id, day)])
+
+    stored = (await store.load_discovery_snapshots(day))[0]
+    assert stored.instrument_id == instrument_id
+    assert stored.trading_date == day
+    assert stored.trend_class == "STRONG_BULL"
+    assert stored.liquidity_class == "HIGH"
+    assert stored.volatility_class == "MEDIUM"
+    assert stored.relative_strength == pytest.approx(87.5)
+    assert stored.indicators == {
+        "ema20": 101.5,
+        "adx14": 32.25,
+        "fresh_high": True,
+        "roc12": None,
+    }, "jsonb must come back as the dict that went in, hole included"
+    assert stored.completeness == pytest.approx(0.75)
+    assert stored.universe == "FNO"
+    assert stored.config_version == 3
+    assert stored.is_simulated is False
+
+    # A day nobody ran is empty, and ordering is deterministic by instrument_id.
+    assert await store.load_discovery_snapshots(date(2026, 10, 8)) == []
+    await store.upsert_instruments(
+        [
+            Instrument(
+                id=0,
+                exchange="NSE",
+                symbol="CONFTEST2",
+                trading_symbol="CONFTEST2",
+                company_name="Conformance Two Ltd",
+                instrument_token="999998",
+            )
+        ]
+    )
+    second = [row for row in await store.list_universe() if row.symbol == "CONFTEST2"][0]
+    await store.upsert_discovery_snapshots(
+        [make_discovery_row(second.id, day, group="NEUTRAL_WATCH", trend_class="NEUTRAL")]
+    )
+    rows = await store.load_discovery_snapshots(day)
+    assert [row.instrument_id for row in rows] == sorted(row.instrument_id for row in rows)
+    assert {row.group for row in rows} == {"STRONG_BULLISH", "NEUTRAL_WATCH"}
 
 
 async def test_stock_profiles_coalesce_listing_date_across_sources(

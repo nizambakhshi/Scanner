@@ -290,6 +290,39 @@ class WeeklyCandle:
 
 
 @dataclass(frozen=True)
+class DiscoverySnapshotRow:
+    """One stored ``(trading_date, instrument_id)`` discovery row (§4.5).
+
+    The storage twin of :class:`worker.analytics.daily.DiscoverySnapshot`: the
+    analytics fold speaks in symbols, the database speaks in ids, and this is
+    the mapping the store's upsert is defined over. ``indicators`` is the full
+    DailyReading fold as stored — a dict of the readings that existed, with
+    ``None`` for each one that did not, and ``completeness`` the fraction of
+    them that were present. Nothing here is an alert or an entry signal: Stage 1
+    classifies and persists, and this row is the record of that judgement.
+    """
+
+    trading_date: date
+    instrument_id: int
+    group: str
+    trend_class: str
+    liquidity_class: str
+    volatility_class: str
+    relative_strength: float | None
+    eligibility: bool
+    reason: str
+    indicators: dict[str, Any]
+    completeness: float
+    universe: str = "FNO"
+    config_version: int = 1
+    is_simulated: bool = False
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.completeness <= 1.0:
+            raise ValueError(f"completeness must be within [0, 1], got {self.completeness}")
+
+
+@dataclass(frozen=True)
 class StockTechnicals:
     """The candles-derived half of ``stock_details`` (written by sync-daily).
 

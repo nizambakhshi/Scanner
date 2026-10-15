@@ -23,6 +23,7 @@ from ..models import (
     Channel,
     DailyCandle,
     DeliveryStatus,
+    DiscoverySnapshotRow,
     IndicatorSnapshot,
     Instrument,
     NotificationDelivery,
@@ -203,6 +204,25 @@ class ScannerStore(ABC):
 
     @abstractmethod
     async def load_weekly_candles(self, instrument_id: int) -> list[WeeklyCandle]: ...
+
+    @abstractmethod
+    async def upsert_discovery_snapshots(self, rows: list[DiscoverySnapshotRow]) -> int:
+        """Idempotent upsert into ``daily_discovery_snapshots`` (PK date + instrument).
+
+        One row per day per instrument: re-running the discovery must overwrite
+        the day's verdicts in place, never append a second set. Returns how many
+        rows the batch touched.
+        """
+
+    @abstractmethod
+    async def load_discovery_snapshots(self, trading_date: date) -> list[DiscoverySnapshotRow]:
+        """One day's stored discovery rows, ordered by ``instrument_id``.
+
+        This is the read half of "skip when unchanged": the discovery runner
+        compares the fresh fold against the stored row and writes only what
+        moved, so it has to be able to read the day back. Deterministic order
+        keeps that comparison position-by-position.
+        """
 
     @abstractmethod
     async def update_stock_technicals(self, rows: list[StockTechnicals]) -> int:

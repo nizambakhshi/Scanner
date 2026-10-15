@@ -37,6 +37,7 @@ from ..models import (
     DailyCandle,
     DataQuality,
     DeliveryStatus,
+    DiscoverySnapshotRow,
     IndicatorSnapshot,
     Instrument,
     MappingStatus,
@@ -87,6 +88,8 @@ SCHEMA_TABLES: tuple[str, ...] = (
     "candles_1d",
     "candles_1w",
     "stock_details",
+    "daily_discovery_snapshots",
+    "setup_candidates",
 )
 
 # Columns daily_summaries accepts from an arbitrary summary payload.
@@ -192,6 +195,35 @@ ON CONFLICT (instrument_id, week_start) DO UPDATE SET
     volume = EXCLUDED.volume,
     rsi14 = EXCLUDED.rsi14,
     source = EXCLUDED.source
+"""
+
+# One stored verdict per day per instrument: the re-run of the discovery
+# upserts the day in place (computed_at is the only column a replay advances).
+_DISCOVERY_SNAPSHOT_UPSERT = """
+INSERT INTO daily_discovery_snapshots (
+    trading_date, instrument_id, discovery_group, trend_class, liquidity_class,
+    volatility_class, relative_strength, eligibility, reason, indicators,
+    completeness, universe, config_version, is_simulated
+) VALUES (
+    %(trading_date)s, %(instrument_id)s, %(discovery_group)s, %(trend_class)s,
+    %(liquidity_class)s, %(volatility_class)s, %(relative_strength)s,
+    %(eligibility)s, %(reason)s, %(indicators)s, %(completeness)s,
+    %(universe)s, %(config_version)s, %(is_simulated)s
+)
+ON CONFLICT (trading_date, instrument_id) DO UPDATE SET
+    discovery_group = EXCLUDED.discovery_group,
+    trend_class = EXCLUDED.trend_class,
+    liquidity_class = EXCLUDED.liquidity_class,
+    volatility_class = EXCLUDED.volatility_class,
+    relative_strength = EXCLUDED.relative_strength,
+    eligibility = EXCLUDED.eligibility,
+    reason = EXCLUDED.reason,
+    indicators = EXCLUDED.indicators,
+    completeness = EXCLUDED.completeness,
+    universe = EXCLUDED.universe,
+    config_version = EXCLUDED.config_version,
+    is_simulated = EXCLUDED.is_simulated,
+    computed_at = now()
 """
 
 # The technicals writer owns only its own columns; the profile writer's
@@ -494,6 +526,25 @@ def _weekly_candle_from_row(row: dict[str, Any]) -> WeeklyCandle:
         volume=int(row["volume"]),
         rsi14=_f(row["rsi14"]),
         source=row["source"],
+    )
+
+
+def _discovery_row_from(row: dict[str, Any]) -> DiscoverySnapshotRow:
+    return DiscoverySnapshotRow(
+        trading_date=row["trading_date"],
+        instrument_id=int(row["instrument_id"]),
+        group=row["discovery_group"],
+        trend_class=row["trend_class"],
+        liquidity_class=row["liquidity_class"],
+        volatility_class=row["volatility_class"],
+        relative_strength=_f(row["relative_strength"]),
+        eligibility=bool(row["eligibility"]),
+        reason=row["reason"],
+        indicators=dict(row["indicators"] or {}),
+        completeness=float(row["completeness"]),
+        universe=row["universe"],
+        config_version=int(row["config_version"]),
+        is_simulated=bool(row["is_simulated"]),
     )
 
 
@@ -858,6 +909,46 @@ class PostgresStore(ScannerStore):
         async with self._pool.connection() as conn, conn.transaction():
             rows = await (await conn.execute(sql, (instrument_id,))).fetchall()
         return [_weekly_candle_from_row(row) for row in rows]
+
+    async def upsert_discovery_snapshots(self, rows: list[DiscoverySnapshotRow]) -> int:
+        if not rows:
+            return 0
+        params = [
+            {
+                "trading_date": row.trading_date,
+                "instrument_id": row.instrument_id,
+                "discovery_group": row.group,
+                "trend_class": row.trend_class,
+                "liquidity_class": row.liquidity_class,
+                "volatility_class": row.volatility_class,
+                "relative_strength": _r(row.relative_strength),
+                "eligibility": row.eligibility,
+                "reason": row.reason,
+                "indicators": _json(row.indicators),
+                "completeness": _r(row.completeness),
+                "universe": row.universe,
+                "config_version": row.config_version,
+                "is_simulated": row.is_simulated,
+            }
+            for row in rows
+        ]
+        async with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await cur.executemany(_DISCOVERY_SNAPSHOT_UPSERT, params)
+        return len(rows)
+
+    async def load_discovery_snapshots(self, trading_date: date) -> list[DiscoverySnapshotRow]:
+        sql = """
+            SELECT trading_date, instrument_id, discovery_group, trend_class,
+                   liquidity_class, volatility_class, relative_strength, eligibility,
+                   reason, indicators, completeness, universe, config_version,
+                   is_simulated
+            FROM daily_discovery_snapshots
+            WHERE trading_date = %s
+            ORDER BY instrument_id
+        """
+        async with self._pool.connection() as conn, conn.transaction():
+            rows = await (await conn.execute(sql, (trading_date,))).fetchall()
+        return [_discovery_row_from(row) for row in rows]
 
     async def update_stock_technicals(self, rows: list[StockTechnicals]) -> int:
         if not rows:
