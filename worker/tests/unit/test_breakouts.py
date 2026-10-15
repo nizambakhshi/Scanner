@@ -516,6 +516,43 @@ def test_flush_judges_the_last_bucket_of_the_day():
     assert t.flush() == []  # idempotent: no open bucket is left
 
 
+# The accessor the pipeline reads for the anti-chase evidence: one derivation of
+# the opening range, consumed everywhere (levels.py states the rule).
+
+
+def test_orb_range_is_none_until_the_first_bucket_is_final():
+    t = orb_t()
+    for o in range(4):
+        t.on_candle(bar(o, 100.0, high=102.0, low=98.0), symbol="AXIS")
+    assert t.orb_range(1) is None  # 09:18: bucket 0 is still open
+    t.on_candle(bar(4, 100.0, high=102.0, low=98.0), symbol="AXIS")
+    assert t.orb_range(1) is None  # even at 09:19 — nothing is final until 09:20 starts
+    t.on_candle(bar(5, 100.5, high=101.0, low=100.0), symbol="AXIS")
+    assert t.orb_range(1) == (102.0, 98.0)
+
+
+def test_orb_range_is_fixed_at_the_first_bucket_and_per_instrument():
+    t = orb_t()
+    play(
+        t,
+        [
+            RANGE,
+            {"close": [100.5, 101.0, 101.5, 102.0, 102.5], "high": 103.5, "low": 100.0},
+            {"close": 102.0, "high": 104.0, "low": 99.0},
+        ],
+    )
+    # The range is bucket 0's: a wilder bucket 1 must not move either end.
+    assert t.orb_range(1) == (102.0, 98.0)
+    assert t.orb_range(2) is None  # an instrument never tracked has no range
+
+
+def test_orb_range_is_empty_when_the_orb_strategy_is_disarmed():
+    """The detector derives nothing it is not judging; consumers fail closed."""
+    t = armed("orb", enabled=False)
+    play(t, [RANGE])
+    assert t.orb_range(1) is None
+
+
 # ── VWAP ────────────────────────────────────────────────────────────────────
 
 

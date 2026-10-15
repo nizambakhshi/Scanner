@@ -22,10 +22,12 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from .alerts import AlertEngine
+from .analytics.antichase import AntiChasePolicy, MarketContext
 from .analytics.breakouts import BreakoutEvent, BreakoutTracker, StrategiesConfig
 from .analytics.indicators import IndicatorRegistry
+from .analytics.levels import LevelBook
 from .analytics.scanner import ScanContext, Scanner
-from .analytics.setups import RetestCandidate, SetupTracker
+from .analytics.setups import ReclaimCandidate, RetestCandidate, SetupTracker
 from .config import ScannerParams
 from .logging_setup import get_logger
 from .marketdata.candle_builder import CandleEngine
@@ -84,6 +86,14 @@ class PipelineCounters:
     #: Observations only in this phase — no alert, no row — so the counter is the
     #: evidence that the watch runs and finds its shapes, or honestly finds none.
     retests_detected: int = 0
+    #: VWAP reclaims detected — the second setup of the same tracker, on the same
+    #: evidence rule as ``retests_detected``.
+    reclaims_detected: int = 0
+    #: Candidates the anti-chase policy did not clear (worker.analytics.antichase).
+    #: Zero while the operator's limits are unset — the count is the suppression
+    #: evidence that silence cannot give, and it turns nonzero the moment a limit
+    #: is configured and a chase walks into it.
+    antichase_blocked: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -97,6 +107,8 @@ class PipelineCounters:
             "breakouts_detected": self.breakouts_detected,
             "breakouts_alerted": self.breakouts_alerted,
             "retests_detected": self.retests_detected,
+            "reclaims_detected": self.reclaims_detected,
+            "antichase_blocked": self.antichase_blocked,
         }
 
 
@@ -130,6 +142,15 @@ class ScannerPipeline:
     #: phase: the pipeline feeds it so the watch is exercised end to end, and the
     #: phases that score and alert on its candidates land next.
     setups: SetupTracker | None = field(default=None, repr=False)
+    #: The anti-chase policy every candidate from the tracker is handed to
+    #: (:class:`worker.analytics.antichase.AntiChasePolicy`). Inert until the
+    #: operator's limits exist (audit D7): with no limits configured every gate
+    #: reports ``skip``, every candidate clears, and the verdicts go to the log.
+    antichase: AntiChasePolicy | None = field(default=None, repr=False)
+    #: Per-instrument level inventories (worker.analytics.levels) — a pure fold of
+    #: today's trustworthy candles. The first consumer is the anti-chase
+    #: resistance gate; a restart rebuilds them by replay, like the ATR.
+    levels: dict[int, LevelBook] = field(default_factory=dict, repr=False)
     _token_index: dict[str, int] = field(default_factory=dict, repr=False)
     _last_tick_at: dict[int, datetime] = field(default_factory=dict, repr=False)
     _last_exchange_ts: dict[int, datetime] = field(default_factory=dict, repr=False)
@@ -148,6 +169,7 @@ class ScannerPipeline:
         self.strategies = self.strategies or StrategiesConfig()
         self.breakouts = BreakoutTracker(strategies=self.strategies, window=self.window)
         self.setups = SetupTracker()
+        self.antichase = AntiChasePolicy()
         for instrument in self.instruments.values():
             if instrument.instrument_token:
                 self._token_index[instrument.instrument_token] = instrument.id
@@ -396,6 +418,7 @@ class ScannerPipeline:
         # trustworthy tape produced, the same treatment its EMA and VWAP get.
         events: list[BreakoutEvent] = []
         retests: list[RetestCandidate] = []
+        reclaims: list[ReclaimCandidate] = []
         if self.feed_status not in OUTAGE_STATUSES:
             events = self.breakouts.on_candle(
                 candle,
@@ -405,17 +428,42 @@ class ScannerPipeline:
                 rsi_5m=values.rsi_5m,
                 trend=result.trend,
             )
-            # The retest watch rides the same trusted tape as the detectors. Open
-            # legs advance *before* this candle's events are handed over, so the
-            # candle that broke the level is judged at its close and never counts
-            # as its own first retest bar.
+            # The level book is a fold of the trustworthy tape, like every other
+            # level here, and it folds this candle *before* the candidates are
+            # judged: "what is overhead" then already knows the print that just
+            # happened, including the candidate candle's own wick.
+            book = self.levels.get(candle.instrument_id)
+            if book is None:
+                book = LevelBook()
+                self.levels[candle.instrument_id] = book
+            if in_session:
+                book.fold(high=candle.high, low=candle.low)
+            # The setup watch rides the same trusted tape as the detectors. Open
+            # legs and the below-VWAP dip advance *before* this candle's events
+            # are handed over, so the candle that broke a level (or crossed back
+            # above the VWAP) is judged at its close and never counts as its own
+            # first retest bar — or as part of its own dip.
             retests = self.setups.on_candle(
                 candle,
                 symbol=instrument.symbol,
                 relative_volume=values.relative_volume,
+                vwap=values.vwap,
             )
             for event in events:
-                self.setups.on_break(event, atr=values.atr)
+                candidate = self.setups.on_event(event, atr=values.atr)
+                if isinstance(candidate, ReclaimCandidate):
+                    reclaims.append(candidate)
+            if retests or reclaims:
+                context = self._market_context(candle, vwap=values.vwap, atr=values.atr)
+                for candidate in (*retests, *reclaims):
+                    report = self.antichase.evaluate(candidate, context=context)
+                    if not report.cleared:
+                        self.counters.antichase_blocked += 1
+                    log.info(
+                        "antichase_verdict",
+                        **report.to_log_dict(),
+                        candle_start=candle.candle_start.isoformat(),
+                    )
         snapshot = result.to_snapshot(
             trading_date=self.window.trading_date,
             config_version=self.params.config_version,
@@ -444,6 +492,7 @@ class ScannerPipeline:
             events, instrument=instrument
         )
         self.counters.retests_detected += len(retests)
+        self.counters.reclaims_detected += len(reclaims)
         outcome = await self.watchlist.on_candle(
             session_id=self.session.id,
             trading_date=self.window.trading_date,
@@ -458,6 +507,35 @@ class ScannerPipeline:
         )
         if outcome.signaled:
             self.counters.signals_raised += 1
+
+    def _market_context(
+        self, candle: Candle, *, vwap: float | None, atr: float | None
+    ) -> MarketContext:
+        """The anti-chase policy's inputs, gathered once per judged candle.
+
+        Every level comes from its one derivation, merged here rather than
+        re-derived: the inventory from the book, the range ends from the
+        breakout tracker. Prior-day ends land when the recovery path reads
+        ``candles_1d`` (a later phase); until then the inventory holds what
+        today's tape and the detectors know.
+        """
+        orb = self.breakouts.orb_range(candle.instrument_id)
+        book = self.levels.get(candle.instrument_id)
+        levels = None
+        if book is not None:
+            levels = tuple(
+                book.inventory(
+                    vwap=vwap,
+                    orb_high=None if orb is None else orb[0],
+                    orb_low=None if orb is None else orb[1],
+                )
+            )
+        return MarketContext(
+            vwap=vwap,
+            atr=atr,
+            orb_low=None if orb is None else orb[1],
+            levels=levels,
+        )
 
     async def _raise_breakouts(
         self, events: list[BreakoutEvent], *, instrument: Instrument

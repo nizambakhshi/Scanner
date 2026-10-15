@@ -1,9 +1,11 @@
-"""Unit tests for the ORB breakout-retest setups (worker.analytics.setups).
+"""Unit tests for the setups — ORB breakout-retest and the VWAP reclaim.
 
 Every expected number is worked out by hand in the comment above it, from the
 definitions stated in the module docstring. The default tolerance of 0.5% on a
 102.0 level gives a touch band top of 102.51 and a failure line of 101.49; the
 zero-tolerance cases exist where a boundary has to be exact in binary floats.
+The reclaim cases feed the tracker the VWAP values the detector would have seen,
+so the dip runs are the ones the live tape would have built.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from worker.analytics.breakouts import DOWN, UP, BreakoutEvent
 from worker.analytics.setups import (
     DEFAULT_MAX_RETEST_BARS,
     DEFAULT_RETEST_TOLERANCE_PCT,
+    ReclaimCandidate,
     RetestCandidate,
     SetupParams,
     SetupTracker,
@@ -74,6 +77,30 @@ def orb_event(**overrides: Any) -> BreakoutEvent:
     return BreakoutEvent(**base)
 
 
+def vwap_event(**overrides: Any) -> BreakoutEvent:
+    """A VWAP UP cross as the detector would hand it over.
+
+    Defaults: TATAMOTORS reclaimed a 100.0 VWAP on the 20-minute-offset candle,
+    closing 100.15 on 1.8x volume.
+    """
+    base: dict[str, Any] = {
+        "strategy": "vwap",
+        "direction": UP,
+        "instrument_id": 1,
+        "symbol": "TATAMOTORS",
+        "level": 100.0,
+        "price": 100.15,
+        "candle_start": minute(20),
+        "trading_date": BASE_DAY,
+        "volume_ratio": 1.8,
+        "cooldown_minutes": 10,
+        "telegram": True,
+        "reasons": ("strategy:vwap", "vwap_reclaim"),
+    }
+    base.update(overrides)
+    return BreakoutEvent(**base)
+
+
 def feed(tracker: SetupTracker, candle: Any, **overrides: Any) -> list[RetestCandidate]:
     """Run one completed candle through the tracker under test."""
     kwargs: dict[str, Any] = {"symbol": "TATAMOTORS"}
@@ -86,9 +113,9 @@ def test_default_constants_are_the_documented_ones() -> None:
     assert DEFAULT_MAX_RETEST_BARS == 30
 
 
-def test_on_break_opens_a_leg_with_the_break_stamped_in() -> None:
+def test_on_event_opens_a_leg_with_the_break_stamped_in() -> None:
     tracker = SetupTracker()
-    leg = tracker.on_break(orb_event(), atr=0.9)
+    leg = tracker.on_event(orb_event(), atr=0.9)
     assert leg is not None
     assert (leg.level, leg.break_price) == (102.0, 103.02)
     assert leg.break_candle_start == minute(15)
@@ -104,7 +131,7 @@ def test_on_break_opens_a_leg_with_the_break_stamped_in() -> None:
     assert tracker.open_leg_count == 1
 
 
-def test_on_break_ignores_everything_but_orb_up() -> None:
+def test_on_event_ignores_everything_but_orb_up() -> None:
     tracker = SetupTracker()
     for strategy, direction in (
         ("orb", DOWN),
@@ -112,7 +139,7 @@ def test_on_break_ignores_everything_but_orb_up() -> None:
         ("vwap", UP),
         ("rsi", UP),
     ):
-        assert tracker.on_break(orb_event(strategy=strategy, direction=direction)) is None
+        assert tracker.on_event(orb_event(strategy=strategy, direction=direction)) is None
     assert tracker.open_leg_count == 0
     assert tracker.legs_for(1) == ()
 
@@ -120,7 +147,7 @@ def test_on_break_ignores_everything_but_orb_up() -> None:
 def test_touch_waits_for_its_reclaim_on_a_later_candle() -> None:
     # The classic shape, walked bar by bar. Band top 102.51, failure 101.49.
     tracker = SetupTracker()
-    tracker.on_break(orb_event(), atr=0.9)
+    tracker.on_event(orb_event(), atr=0.9)
 
     # run-up: high 103.8 extends the evidence, low 103.0 stays clear of the band
     assert feed(tracker, bar(16, 103.5, high=103.8, low=103.0)) == []
@@ -156,7 +183,7 @@ def test_touch_waits_for_its_reclaim_on_a_later_candle() -> None:
 
 def test_one_candle_may_touch_and_reclaim_at_once() -> None:
     tracker = SetupTracker()
-    tracker.on_break(orb_event())
+    tracker.on_event(orb_event())
     candidates = feed(tracker, bar(16, 102.5, high=102.6, low=101.9))
     assert len(candidates) == 1
     c = candidates[0]
@@ -177,7 +204,7 @@ def test_a_close_below_the_failure_line_drops_the_leg_even_when_it_dipped_in() -
     # low 101.0 is inside the band, but close 101.2 is below the failure line
     # 101.49: the level did not hold, and the failure is checked first.
     tracker = SetupTracker()
-    tracker.on_break(orb_event())
+    tracker.on_event(orb_event())
     assert feed(tracker, bar(16, 101.2, high=102.0, low=101.0)) == []
     assert tracker.legs_for(1) == ()
     assert tracker.open_leg_count == 0
@@ -187,7 +214,7 @@ def test_zero_tolerance_pins_the_level_as_the_whole_line() -> None:
     # With tolerance 0 the band and the failure line are the level itself, and
     # every comparison lands exactly on it in binary floats.
     tracker = SetupTracker(params=SetupParams(retest_tolerance_pct=0.0))
-    tracker.on_break(orb_event(level=100.0, price=100.8))
+    tracker.on_event(orb_event(level=100.0, price=100.8))
 
     # close exactly at the level: not a failure (strictly below), not a
     # reclaim (strictly above) — a touch and nothing more
@@ -206,7 +233,7 @@ def test_zero_tolerance_pins_the_level_as_the_whole_line() -> None:
 
 def test_zero_tolerance_close_below_the_level_fails() -> None:
     tracker = SetupTracker(params=SetupParams(retest_tolerance_pct=0.0))
-    tracker.on_break(orb_event(level=100.0, price=100.8))
+    tracker.on_event(orb_event(level=100.0, price=100.8))
     assert feed(tracker, bar(16, 99.99, high=100.2, low=99.99)) == []
     assert tracker.legs_for(1) == ()
 
@@ -216,7 +243,7 @@ def test_reclaim_at_the_expiry_boundary_is_kept_and_one_bar_later_is_not() -> No
 
     # kept: the reclaim lands exactly on bar 2 of 2
     kept = SetupTracker(params=params)
-    kept.on_break(orb_event())
+    kept.on_event(orb_event())
     feed(kept, bar(16, 103.2, high=103.4, low=103.0))
     candidates = feed(kept, bar(17, 102.5, high=102.6, low=101.9))
     assert len(candidates) == 1
@@ -224,7 +251,7 @@ def test_reclaim_at_the_expiry_boundary_is_kept_and_one_bar_later_is_not() -> No
 
     # dropped: the same shape one bar past the window
     late = SetupTracker(params=params)
-    late.on_break(orb_event())
+    late.on_event(orb_event())
     feed(late, bar(16, 103.2, high=103.4, low=103.0))
     feed(late, bar(17, 103.1, high=103.3, low=103.0))
     assert feed(late, bar(18, 102.6, high=102.7, low=101.8)) == []
@@ -233,7 +260,7 @@ def test_reclaim_at_the_expiry_boundary_is_kept_and_one_bar_later_is_not() -> No
 
 def test_a_foreign_date_candle_drops_the_leg() -> None:
     tracker = SetupTracker()
-    tracker.on_break(orb_event())
+    tracker.on_event(orb_event())
     assert feed(tracker, bar(16, 103.5, high=103.8, low=103.0, day=NEXT_DAY)) == []
     assert tracker.legs_for(1) == ()
     assert tracker.open_leg_count == 0
@@ -241,7 +268,7 @@ def test_a_foreign_date_candle_drops_the_leg() -> None:
 
 def test_candles_of_other_instruments_leave_the_leg_alone() -> None:
     tracker = SetupTracker()
-    tracker.on_break(orb_event())
+    tracker.on_event(orb_event())
     # an instrument with no legs is a no-op
     assert feed(tracker, bar(16, 50.0, instrument_id=2)) == []
     assert tracker.open_leg_count == 1
@@ -252,7 +279,7 @@ def test_candles_of_other_instruments_leave_the_leg_alone() -> None:
 
 def test_a_consumed_leg_never_emits_twice() -> None:
     tracker = SetupTracker()
-    tracker.on_break(orb_event())
+    tracker.on_event(orb_event())
     assert len(feed(tracker, bar(16, 102.5, high=102.6, low=101.9))) == 1
     # the next candle also closes above the level after the earlier touch —
     # but the leg is gone, so there is nothing left to reclaim
@@ -267,8 +294,8 @@ def test_two_legs_advance_and_consume_independently() -> None:
     # it too — the boundary is the only shape that separates the two legs on
     # one candle).
     tracker = SetupTracker(params=SetupParams(retest_tolerance_pct=0.0))
-    tracker.on_break(orb_event(level=100.0, price=100.8))
-    tracker.on_break(orb_event(level=100.5, price=100.8))
+    tracker.on_event(orb_event(level=100.0, price=100.8))
+    tracker.on_event(orb_event(level=100.5, price=100.8))
     assert tracker.open_leg_count == 2
 
     # candle low 100.0, close 100.5: touches both, reclaims only the 100.0 leg
@@ -286,7 +313,7 @@ def test_depth_goes_negative_when_the_band_held_from_above() -> None:
     # low 102.3 never reached the level (102.0) but is inside the band top
     # 102.51, and the same candle closes 102.6 above the level.
     tracker = SetupTracker()
-    tracker.on_break(orb_event())
+    tracker.on_event(orb_event())
     candidates = feed(tracker, bar(16, 102.6, high=102.6, low=102.3))
     assert len(candidates) == 1
     # depth (102−102.3)/102 × 100 = −0.29411765%
@@ -295,7 +322,7 @@ def test_depth_goes_negative_when_the_band_held_from_above() -> None:
 
 def test_a_degenerate_atr_never_produces_an_atr_multiple() -> None:
     tracker = SetupTracker()
-    tracker.on_break(orb_event(), atr=0.0)
+    tracker.on_event(orb_event(), atr=0.0)
     candidates = feed(tracker, bar(16, 102.5, high=102.6, low=101.9))
     assert len(candidates) == 1
     assert candidates[0].atr_at_break == 0.0
@@ -304,7 +331,7 @@ def test_a_degenerate_atr_never_produces_an_atr_multiple() -> None:
 
 def test_candidate_log_dict_rounds_the_evidence() -> None:
     tracker = SetupTracker()
-    tracker.on_break(orb_event(), atr=0.9)
+    tracker.on_event(orb_event(), atr=0.9)
     feed(tracker, bar(16, 103.5, high=103.8, low=103.0))
     feed(tracker, bar(17, 101.7, high=102.5, low=101.8))
     candidate = feed(tracker, bar(18, 102.9, high=102.9, low=101.9), relative_volume=1.8)[0]
@@ -322,7 +349,7 @@ def test_candidate_log_dict_rounds_the_evidence() -> None:
 
 def test_a_reclaim_without_volume_reports_none() -> None:
     tracker = SetupTracker()
-    tracker.on_break(orb_event())
+    tracker.on_event(orb_event())
     candidate = feed(tracker, bar(16, 102.5, high=102.6, low=101.9))[0]
     assert candidate.volume_ratio is None
     assert candidate.to_log_dict()["volume_ratio"] is None
@@ -353,8 +380,8 @@ def test_tracker_refuses_invalid_parameters_at_construction() -> None:
 
 def test_reset_forgets_every_leg_and_the_window_reopens() -> None:
     tracker = SetupTracker()
-    tracker.on_break(orb_event())
-    tracker.on_break(orb_event(instrument_id=2, symbol="INFY"))
+    tracker.on_event(orb_event())
+    tracker.on_event(orb_event(instrument_id=2, symbol="INFY"))
     assert tracker.open_leg_count == 2
 
     tracker.reset()
@@ -362,5 +389,147 @@ def test_reset_forgets_every_leg_and_the_window_reopens() -> None:
     assert tracker.open_leg_count == 0
     assert tracker.legs_for(1) == ()
     assert feed(tracker, bar(16, 102.5, high=102.6, low=101.9)) == []
-    assert tracker.on_break(orb_event()) is not None
+    assert tracker.on_event(orb_event()) is not None
     assert tracker.open_leg_count == 1
+
+
+# ── the VWAP reclaim ────────────────────────────────────────────────────────
+
+
+def test_vwap_reclaim_needs_a_dip_and_carries_it_as_evidence() -> None:
+    tracker = SetupTracker()
+    # three closes below the standing VWAP of 100.0 — the dip runs 99.5 → 99.2
+    assert feed(tracker, bar(16, 99.7, high=99.9, low=99.5), vwap=100.0) == []
+    assert feed(tracker, bar(17, 99.6, high=99.8, low=99.4), vwap=100.0) == []
+    assert feed(tracker, bar(18, 99.4, high=99.6, low=99.2), vwap=100.0) == []
+    run = tracker.dip_for(1)
+    assert (run.bars, run.low, run.ended) == (3, 99.2, False)
+    assert tracker.open_dip_count == 1
+
+    # the crossing candle closes back above the VWAP: the run ends, and the
+    # detector's event for this same candle is what follows in the pipeline
+    assert feed(tracker, bar(19, 100.15, high=100.2, low=99.8), vwap=99.9) == []
+    assert tracker.dip_for(1).ended is True
+
+    candidate = tracker.on_event(vwap_event(candle_start=minute(19)), atr=0.5)
+    assert isinstance(candidate, ReclaimCandidate)
+    assert (candidate.instrument_id, candidate.symbol, candidate.trading_date) == (
+        1,
+        "TATAMOTORS",
+        BASE_DAY,
+    )
+    assert (candidate.level, candidate.reclaim_at, candidate.reclaim_price) == (
+        100.0,
+        minute(19),
+        100.15,
+    )
+    assert (candidate.dip_low, candidate.bars_below) == (99.2, 3)
+    assert (candidate.volume_ratio, candidate.atr_at_reclaim) == (1.8, 0.5)
+    # depth (100−99.2)/100 × 100 = 0.8%
+    assert candidate.depth_pct == pytest.approx(0.8, rel=1e-12)
+    # one dip, one candidate: consumed
+    assert tracker.dip_for(1) is None
+    assert tracker.open_dip_count == 0
+
+
+def test_a_cross_with_no_dip_behind_it_raises_no_candidate() -> None:
+    # A tape that never stood below its VWAP cannot *reclaim* one: whatever
+    # raised the cross (a replay, a restarted process that never watched the
+    # dip), the setup is not ours to claim. The detector keeps the same
+    # silence for the day's first determination; this is its structural twin.
+    tracker = SetupTracker()
+    assert feed(tracker, bar(16, 100.4), vwap=100.0) == []
+    assert feed(tracker, bar(17, 100.5), vwap=100.2) == []
+    assert tracker.dip_for(1) is None
+    assert tracker.on_event(vwap_event()) is None
+
+
+def test_a_consumed_dip_never_emits_twice() -> None:
+    tracker = SetupTracker()
+    feed(tracker, bar(16, 99.5), vwap=100.0)
+    feed(tracker, bar(17, 100.4), vwap=100.0)
+    assert tracker.on_event(vwap_event()) is not None
+    # the same cross again — there is no dip behind it any more
+    assert tracker.on_event(vwap_event()) is None
+
+
+def test_a_new_dip_after_a_consumed_reclaim_starts_fresh() -> None:
+    tracker = SetupTracker()
+    feed(tracker, bar(16, 99.5), vwap=100.0)
+    feed(tracker, bar(17, 100.4), vwap=100.0)
+    assert tracker.on_event(vwap_event()) is not None
+
+    # the tape dips again: the new run replaces nothing stale from the old dip
+    feed(tracker, bar(18, 99.8, low=99.7), vwap=100.0)
+    feed(tracker, bar(19, 99.6, low=99.55), vwap=100.0)
+    feed(tracker, bar(20, 100.3), vwap=100.0)
+    candidate = tracker.on_event(vwap_event(candle_start=minute(20), price=100.3))
+    assert candidate is not None
+    assert (candidate.dip_low, candidate.bars_below) == (99.55, 2)
+
+
+def test_the_dip_counts_closes_below_the_vwap_itself_not_the_band() -> None:
+    # The tracker measures the dip against the VWAP, while the detector's band
+    # belongs to the trigger's hysteresis: a close a hair below the VWAP is
+    # below the tape's centre of gravity and extends the run.
+    tracker = SetupTracker()
+    feed(tracker, bar(16, 99.99), vwap=100.0)
+    run = tracker.dip_for(1)
+    assert (run.bars, run.low) == (1, 99.99)
+
+
+def test_a_missing_vwap_pauses_the_dip_watch() -> None:
+    tracker = SetupTracker()
+    assert feed(tracker, bar(16, 99.5), vwap=None) == []
+    assert tracker.dip_for(1) is None, "no measure, no run"
+
+    feed(tracker, bar(17, 99.5), vwap=100.0)
+    feed(tracker, bar(18, 99.0, low=98.9), vwap=None)
+    run = tracker.dip_for(1)
+    assert (run.bars, run.low, run.ended) == (1, 99.5, False), (
+        "the candle without a VWAP neither extended nor ended the run"
+    )
+
+
+def test_a_foreign_date_candle_ends_the_dip_without_seeding_a_new_one() -> None:
+    tracker = SetupTracker()
+    feed(tracker, bar(16, 99.5), vwap=100.0)
+    assert tracker.dip_for(1) is not None
+    # a warm-up or replay bar from another day can only end the run
+    feed(tracker, bar(17, 99.4, low=99.3, day=NEXT_DAY), vwap=100.0)
+    assert tracker.dip_for(1) is None
+
+
+def test_a_vwap_loss_event_is_not_a_reclaim() -> None:
+    tracker = SetupTracker()
+    feed(tracker, bar(16, 99.5), vwap=100.0)
+    assert (
+        tracker.on_event(vwap_event(direction=DOWN, level=99.5, price=99.4)) is None
+    )
+    assert tracker.dip_for(1) is not None, "and it leaves the dip watch untouched"
+
+
+def test_a_reclaim_candidate_log_dict_rounds_the_evidence() -> None:
+    tracker = SetupTracker()
+    feed(tracker, bar(16, 99.2, high=99.4, low=99.2), vwap=100.0)
+    feed(tracker, bar(17, 100.15, high=100.2, low=99.8), vwap=99.9)
+    candidate = tracker.on_event(vwap_event(candle_start=minute(17)), atr=0.5)
+    assert candidate.to_log_dict() == {
+        "symbol": "TATAMOTORS",
+        "level": 100.0,
+        "reclaim_price": 100.15,
+        "dip_low": 99.2,
+        "depth_pct": 0.8,  # (100−99.2)/100 = 0.8%
+        "bars_below": 1,
+        "volume_ratio": 1.8,
+        "reclaim_at": minute(17).isoformat(),
+    }
+
+
+def test_reset_forgets_every_dip_too() -> None:
+    tracker = SetupTracker()
+    feed(tracker, bar(16, 99.5), vwap=100.0)
+    assert tracker.open_dip_count == 1
+    tracker.reset()
+    assert tracker.dip_for(1) is None
+    assert tracker.open_dip_count == 0

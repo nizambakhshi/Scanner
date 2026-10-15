@@ -1142,3 +1142,15 @@ class BreakoutTracker:
         state = self._state.get(instrument_id)
         return None if state is None else state.rsi.state
 
+    def orb_range(self, instrument_id: int) -> tuple[float, float] | None:
+        """The opening range's ends ``(high, low)``, or ``None`` before it exists.
+
+        Read by the pipeline to hand the anti-chase policy the stop basis for an
+        ORB retest and the level inventory the range's ends — one derivation of
+        the opening range, consumed everywhere, the rule the inventory states.
+        """
+        state = self._state.get(instrument_id)
+        if state is None or state.orb.or_high is None or state.orb.or_low is None:
+            return None
+        return (state.orb.or_high, state.orb.or_low)
+

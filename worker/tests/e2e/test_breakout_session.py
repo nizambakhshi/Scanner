@@ -19,6 +19,7 @@ from dataclasses import replace
 
 from tests.conftest import BASE_DAY, minute
 from tests.e2e.test_pipeline_session import build, falling_ticks, inst, rising_ticks
+from worker.analytics.antichase import AntiChaseParams, AntiChasePolicy
 from worker.analytics.breakouts import DEFAULTS, StrategiesConfig
 from worker.models import Channel, DeliveryStatus, SignalType
 
@@ -75,6 +76,35 @@ def orb_retest_ticks() -> list[tuple[float, float, int]]:
     ]
     retest = [(101.6, 101.3, 1000), (101.0, 100.1, 1000), (100.3, 100.6, 1000)]
     return flat + rally + retest
+
+
+def vwap_reclaim_ticks() -> list[tuple[float, float, int]]:
+    """Seven flat minutes that lose the VWAP and then take it back.
+
+    All volumes equal, so the running VWAP is the mean of the closes so far:
+
+    * minutes 0-4: 99.8, 99.6, 99.4, 99.0, 98.8 — every close from minute 1 on
+      is below the mean that already includes it (99.7 at m1, 99.6 at m2, 99.45
+      at m3, 99.32 at m4), so the tracker's dip runs four bars, low 98.8;
+    * minute 2's close is the second consecutive one below the mean, which is
+      the detector's *first determination* of the day — silent by design;
+    * minute 5: 99.6 > 99.3667 ends the dip and starts the confirmation count;
+    * minute 6: 100.0 > 99.4571 is the second consecutive close above, so the
+      detector raises the vwap_reclaim event (level 99.4571, price 100.0) and
+      the tracker consumes the ended dip into one reclaim candidate.
+    """
+    return [(p, p, 1000) for p in (99.8, 99.6, 99.4, 99.0, 98.8, 99.6, 100.0)]
+
+
+#: The VWAP rule alone on the reclaimed tape: threshold 0 so the band is the
+#: VWAP itself, and no volume gate (a seven-minute tape has no relative-volume
+#: baseline). One vwap_reclaim event, one reclaim candidate, zero alerts from it.
+VWAP_RECLAIM: dict[str, object] = {
+    "vwap": {"threshold_pct": 0.0, "min_volume_ratio": 0.0},
+    "session_break": False,
+    "orb": False,
+    "rsi": False,
+}
 
 
 async def test_a_new_day_high_becomes_a_breakout_signal_and_a_telegram_push():
@@ -255,6 +285,59 @@ async def test_the_orb_retest_watch_rides_the_pipeline_and_stays_silent():
     assert len(s.signals_of(SignalType.BREAKOUT_UP, instrument_id=1)) == 1, (
         "the reclaim is observed, never alerted — no second level-break row"
     )
+
+
+async def test_the_vwap_reclaim_becomes_a_candidate_and_the_board_is_untouched():
+    """The dip is what makes the reclaim; the detector's event is what proves it.
+
+    Phase 2D observes only: the crossing produces one reclaim candidate for the
+    policy to judge (``reclaims_detected``), and under the shipped defaults —
+    every gate not configured — the policy blocks nothing. The vwap_reclaim
+    signal that existed before this phase is still the one alert on the tape.
+    """
+    s = await build(
+        [inst(1, "RELIANCE")],
+        {1: vwap_reclaim_ticks()},
+        strategies=session_params(**VWAP_RECLAIM),
+    )
+    await s.connect()
+    await s.run_minutes(7)  # through minute 6: the reclaim event's own candle
+
+    assert s.pipeline.counters.reclaims_detected == 1
+    assert s.pipeline.counters.antichase_blocked == 0, "defaults judge nothing"
+    assert s.pipeline.setups.dip_for(1) is None, "one dip, one candidate: consumed"
+    ups = s.signals_of(SignalType.BREAKOUT_UP, instrument_id=1)
+    assert len(ups) == 1, "the vwap_reclaim detector event is the one alert …"
+    assert ups[0].reasons[0] == "strategy:vwap"
+    assert "vwap_reclaim" in ups[0].reasons
+    assert s.pipeline.counters.breakouts_detected == 1, "… and the candidate adds no event"
+
+
+async def test_a_configured_policy_blocks_the_reclaim_as_evidence_never_suppression():
+    """One limit on the same tape: the candidate is caught chasing, nothing else moves.
+
+    ``max_vwap_distance_pct=0.4``: the reclaim closes (100.0 − 99.4571…) / 99.4571…
+    ≈ 0.546 % above its VWAP — outside the cap, so the policy counts the candidate
+    as blocked. Phase 2D observes only, so the vwap_reclaim row and its delivery
+    are exactly what they were under the default policy; the block exists in the
+    counters and the verdict log, which is what the readiness phase will read.
+    """
+    s = await build(
+        [inst(1, "RELIANCE")],
+        {1: vwap_reclaim_ticks()},
+        strategies=session_params(**VWAP_RECLAIM),
+    )
+    s.pipeline.antichase = AntiChasePolicy(
+        params=AntiChaseParams(max_vwap_distance_pct=0.4)
+    )
+    await s.connect()
+    await s.run_minutes(7)
+
+    assert s.pipeline.counters.reclaims_detected == 1, "the candidate still happened"
+    assert s.pipeline.counters.antichase_blocked == 1
+    ups = s.signals_of(SignalType.BREAKOUT_UP, instrument_id=1)
+    assert len(ups) == 1, "a blocked candidate is evidence, not a suppressed alert"
+    assert s.pipeline.counters.breakouts_detected == 1
 
 
 async def test_a_mid_day_restart_rebuilds_levels_without_alerting_for_the_morning():
