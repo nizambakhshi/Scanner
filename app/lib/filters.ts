@@ -9,7 +9,7 @@
  * the whole board, never an unexplained empty table.
  */
 
-import type { OrbView, SignalType, StockOverviewRow } from "./types";
+import type { OrbView, SignalType, StockOverviewRow, WatchlistRow } from "./types";
 
 /**
  * Every signal type a row can carry, in the order the feed lists them.
@@ -73,6 +73,34 @@ export function filterStocksByBias(rows: StockOverviewRow[], filter: StockBiasFi
       return rows.filter((row) => row.rsi_bias === "OVERBOUGHT");
     case "NEUTRAL":
       return rows.filter((row) => row.rsi_bias === "NEUTRAL");
+    default:
+      return rows;
+  }
+}
+
+export type WatchlistStateFilter = "ALL" | "TRACKED" | "WEAKENING" | "REMOVED";
+
+const WATCHLIST_STATE_FILTERS: readonly string[] = ["TRACKED", "WEAKENING", "REMOVED"];
+
+export function parseWatchlistStateFilter(raw: string | string[] | undefined): WatchlistStateFilter {
+  const value = (Array.isArray(raw) ? raw[0] : raw)?.toUpperCase() ?? "";
+  return (WATCHLIST_STATE_FILTERS.includes(value) ? value : "ALL") as WatchlistStateFilter;
+}
+
+/** `TRACKED` is "on the list right now" (ACTIVE or REQUALIFIED); `WEAKENING`
+ *  groups the two degraded-but-present states, including DATA_STALE — a frozen
+ *  feed is a membership that needs attention, not a removal. A WARMING_UP row
+ *  is in none of the three cuts: it is neither tracked (not yet judged), nor
+ *  weakening, nor removed — it appears under ALL, and that is the honest place
+ *  for a state that has not produced a verdict yet. */
+export function filterWatchlistByState(rows: WatchlistRow[], filter: WatchlistStateFilter): WatchlistRow[] {
+  switch (filter) {
+    case "TRACKED":
+      return rows.filter((row) => row.current_state === "ACTIVE" || row.current_state === "REQUALIFIED");
+    case "WEAKENING":
+      return rows.filter((row) => row.current_state === "WEAKENING" || row.current_state === "DATA_STALE");
+    case "REMOVED":
+      return rows.filter((row) => row.current_state === "REMOVED");
     default:
       return rows;
   }

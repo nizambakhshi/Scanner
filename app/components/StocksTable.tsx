@@ -35,17 +35,17 @@ export function StocksTable({
             <th className="th text-right">Price</th>
             <th className="th text-right">Chg %</th>
             {sparklines ? (
-              <th className="th" title="Last 15 completed daily closes, oldest → newest">
+              <th className="th hidden lg:table-cell" title="Last 15 completed daily closes, oldest → newest">
                 Trend
               </th>
             ) : null}
-            <th className="th text-right">P/E</th>
-            <th className="th text-right">52W high</th>
-            <th className="th text-right">52W low</th>
-            <th className="th text-right">ATH</th>
-            <th className="th text-right">ATL</th>
-            <th className="th text-right">Listed</th>
-            <th className="th text-right">Mkt cap</th>
+            <th className="th hidden text-right xl:table-cell">P/E</th>
+            <th className="th hidden text-right xl:table-cell">52W high</th>
+            <th className="th hidden text-right xl:table-cell">52W low</th>
+            <th className="th hidden text-right xl:table-cell">ATH</th>
+            <th className="th hidden text-right xl:table-cell">ATL</th>
+            <th className="th hidden text-right xl:table-cell">Listed</th>
+            <th className="th hidden text-right xl:table-cell">Mkt cap</th>
             <th className="th text-right" title="Wilder RSI-14 from the last completed daily bar">
               RSI D
             </th>
@@ -74,7 +74,7 @@ export function StocksTable({
                 </td>
                 <td className={`td num text-right ${changeTone(change)}`}>{pct(change)}</td>
                 {sparklines ? (
-                  <td className="td">
+                  <td className="td hidden lg:table-cell">
                     <Sparkline
                       values={sparklines[row.instrument_id]}
                       width={120}
@@ -82,15 +82,15 @@ export function StocksTable({
                     />
                   </td>
                 ) : null}
-                <td className="td num text-right">{row.pe_ratio === null ? "—" : row.pe_ratio.toFixed(1)}</td>
-                <td className="td num text-right">{price(row.high_52w)}</td>
-                <td className="td num text-right">{price(row.low_52w)}</td>
-                <td className="td num text-right">{price(row.ath)}</td>
-                <td className="td num text-right">{price(row.atl)}</td>
-                <td className="td num text-right" title={row.listing_date ?? undefined}>
+                <td className="td hidden num text-right xl:table-cell">{row.pe_ratio === null ? "—" : row.pe_ratio.toFixed(1)}</td>
+                <td className="td hidden num text-right xl:table-cell">{price(row.high_52w)}</td>
+                <td className="td hidden num text-right xl:table-cell">{price(row.low_52w)}</td>
+                <td className="td hidden num text-right xl:table-cell">{price(row.ath)}</td>
+                <td className="td hidden num text-right xl:table-cell">{price(row.atl)}</td>
+                <td className="td hidden num text-right xl:table-cell" title={row.listing_date ?? undefined}>
                   {row.listing_date ? row.listing_date.slice(0, 4) : "—"}
                 </td>
-                <td className="td num text-right">{crores(row.market_cap_cr)}</td>
+                <td className="td hidden num text-right xl:table-cell">{crores(row.market_cap_cr)}</td>
                 <td className={`td num text-right ${rsiBandTone(row.daily_rsi)}`}>{rsi(row.daily_rsi)}</td>
                 <td className={`td num text-right ${rsiBandTone(row.weekly_rsi)}`}>{rsi(row.weekly_rsi)}</td>
                 <td className="td">

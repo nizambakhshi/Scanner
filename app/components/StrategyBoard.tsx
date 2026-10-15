@@ -352,10 +352,10 @@ function TodayCounts({ strategy, counts }: { strategy: StrategyKey; counts: { up
   const redCount = green === "UP" ? counts.down : counts.up;
   const total = greenCount + redCount;
   const chosen = greenCount >= redCount ? green : red;
-  const href = `/signals?type=${total === 0 ? "" : types[chosen]}`;
+  const href = `/watchlist?type=${total === 0 ? "" : types[chosen]}#alerts`;
   return (
     <Link
-      href={total === 0 ? "/signals" : href}
+      href={total === 0 ? "/watchlist#alerts" : href}
       title={`${STRATEGY_COPY[strategy].label}: the rows this rule wrote today — the signal feed, not the messages it sent`}
       className="chip border-line bg-surface-2 text-muted hover:border-line-2 hover:text-ink-2"
     >

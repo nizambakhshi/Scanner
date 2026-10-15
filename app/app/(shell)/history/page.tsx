@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { Panel, Metric, ErrorNote, Empty, PageHeading } from "@/components/ui";
 import { duration, longDate, orDash } from "@/lib/format";
 import { ok, panel } from "@/lib/panel";
@@ -77,25 +76,23 @@ export default async function HistoryPage({ searchParams }: { searchParams: Prom
                   <th className="th">Date</th>
                   <th className="th">Status</th>
                   <th className="th text-right">Universe</th>
-                  <th className="th text-right">Mapped</th>
-                  <th className="th text-right">Subscribed</th>
-                  <th className="th text-right">Monitored</th>
+                  <th className="th hidden text-right lg:table-cell">Mapped</th>
+                  <th className="th hidden text-right lg:table-cell">Subscribed</th>
+                  <th className="th hidden text-right lg:table-cell">Monitored</th>
                   <th className="th text-right">Qualified</th>
                   <th className="th text-right">Signals</th>
-                  <th className="th text-right">Delivered</th>
-                  <th className="th text-right">Failed</th>
-                  <th className="th text-right">Stale</th>
-                  <th className="th">Finalized</th>
-                  <th className="th">Notes</th>
+                  <th className="th hidden text-right md:table-cell">Delivered</th>
+                  <th className="th hidden text-right md:table-cell">Failed</th>
+                  <th className="th hidden text-right lg:table-cell">Stale</th>
+                  <th className="th hidden lg:table-cell">Finalized</th>
+                  <th className="th hidden lg:table-cell">Notes</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((row) => (
                   <tr key={row.trading_session_id} className="row-hover border-b border-line last:border-0">
                     <td className="td num font-semibold">
-                      <Link href={`/watchlist?date=${row.trading_date}`} className="link">
-                        {row.trading_date}
-                      </Link>
+                      {row.trading_date}
                       <span className="ml-1.5 text-[11px] font-normal text-muted">{longDate(row.trading_date).slice(0, 3)}</span>
                     </td>
                     <td className="td">
@@ -112,26 +109,26 @@ export default async function HistoryPage({ searchParams }: { searchParams: Prom
                       </span>
                     </td>
                     <td className="td num text-right">{row.universe_count}</td>
-                    <td className="td num text-right">{row.mapped_count}</td>
-                    <td className="td num text-right">{row.subscribed_count}</td>
-                    <td className={`td num text-right ${row.monitored_count < row.subscribed_count ? "text-amber" : ""}`}>
+                    <td className="td hidden num text-right lg:table-cell">{row.mapped_count}</td>
+                    <td className="td hidden num text-right lg:table-cell">{row.subscribed_count}</td>
+                    <td className={`td hidden num text-right lg:table-cell ${row.monitored_count < row.subscribed_count ? "text-amber" : ""}`}>
                       {row.monitored_count}
                     </td>
                     <td className={`td num text-right font-semibold ${row.qualified_count > 0 ? "text-positive" : "text-muted"}`}>
                       {row.qualified_count}
                     </td>
                     <td className="td num text-right">{row.signals_generated}</td>
-                    <td className={`td num text-right ${row.telegram_delivered > 0 ? "text-positive" : "text-muted"}`}>
+                    <td className={`td hidden num text-right md:table-cell ${row.telegram_delivered > 0 ? "text-positive" : "text-muted"}`}>
                       {row.telegram_delivered}
                     </td>
-                    <td className={`td num text-right ${row.telegram_failed > 0 ? "text-negative font-semibold" : "text-muted"}`}>
+                    <td className={`td hidden num text-right md:table-cell ${row.telegram_failed > 0 ? "text-negative font-semibold" : "text-muted"}`}>
                       {row.telegram_failed}
                     </td>
-                    <td className={`td num text-right ${row.stale_data_seconds > 0 ? "text-amber" : "text-muted"}`}>
+                    <td className={`td hidden num text-right lg:table-cell ${row.stale_data_seconds > 0 ? "text-amber" : "text-muted"}`}>
                       {duration(row.stale_data_seconds)}
                     </td>
-                    <td className="td num text-[12px]">{row.finalized_at ? row.finalized_at.slice(11, 16) : "—"}</td>
-                    <td className="td max-w-[260px] text-[12px] text-muted">{orDash(row.notes)}</td>
+                    <td className="td hidden num text-[12px] lg:table-cell">{row.finalized_at ? row.finalized_at.slice(11, 16) : "—"}</td>
+                    <td className="td hidden max-w-[260px] text-[12px] text-muted lg:table-cell">{orDash(row.notes)}</td>
                   </tr>
                 ))}
               </tbody>

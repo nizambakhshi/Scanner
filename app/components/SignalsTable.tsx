@@ -39,11 +39,11 @@ export function SignalsTable({
             <th className="th">Symbol</th>
             <th className="th">Signal</th>
             <th className="th text-right">Price</th>
-            <th className="th text-right">Day chg</th>
-            <th className="th text-right">Rel vol</th>
-            <th className="th text-right">Score</th>
-            {compact ? null : <th className="th text-right">vs VWAP</th>}
-            {compact ? null : <th className="th">Message</th>}
+            <th className="th hidden text-right md:table-cell">Day chg</th>
+            <th className="th hidden text-right lg:table-cell">Rel vol</th>
+            <th className="th hidden text-right md:table-cell">Score</th>
+            {compact ? null : <th className="th hidden text-right lg:table-cell">vs VWAP</th>}
+            {compact ? null : <th className="th hidden xl:table-cell">Message</th>}
             <th className="th">Delivery</th>
           </tr>
         </thead>
@@ -84,16 +84,16 @@ export function SignalsTable({
                     {signal.previous_close === null ? "" : `prev ${price(signal.previous_close)}`}
                   </div>
                 </td>
-                <td className={`td num text-right ${signal.intraday_change_pct && signal.intraday_change_pct < 0 ? "text-negative" : "text-positive"}`}>
+                <td className={`td hidden num text-right md:table-cell ${signal.intraday_change_pct && signal.intraday_change_pct < 0 ? "text-negative" : "text-positive"}`}>
                   {pct(signal.intraday_change_pct)}
                 </td>
-                <td className="td num text-right">{multiple(signal.relative_volume)}</td>
-                <td className="td num text-right">
+                <td className="td hidden num text-right lg:table-cell">{multiple(signal.relative_volume)}</td>
+                <td className="td hidden num text-right md:table-cell">
                   {score(signal.score)}
                   <div className="num text-[11px] text-muted">{signal.rank === null ? "" : `rank ${signal.rank}`}</div>
                 </td>
                 {compact ? null : (
-                  <td className="td num text-right">
+                  <td className="td hidden num text-right lg:table-cell">
                     {pct(
                       signal.price !== null && signal.vwap !== null
                         ? ((signal.price - signal.vwap) / signal.vwap) * 100
@@ -103,7 +103,7 @@ export function SignalsTable({
                   </td>
                 )}
                 {compact ? null : (
-                  <td className="td max-w-[280px]">
+                  <td className="td hidden max-w-[280px] xl:table-cell">
                     <p className="text-[12px] leading-snug text-ink-2">{signal.message ?? reasonList(signal.reasons)}</p>
                   </td>
                 )}

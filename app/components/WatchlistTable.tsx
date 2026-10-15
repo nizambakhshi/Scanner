@@ -37,25 +37,25 @@ export function WatchlistTable({
           <tr className="border-b border-line">
             <th className="th">Symbol</th>
             {sparklines ? (
-              <th className="th" title="Close of each traded 5-minute bucket today, oldest → newest">
+              <th className="th hidden lg:table-cell" title="Close of each traded 5-minute bucket today, oldest → newest">
                 Trend
               </th>
             ) : null}
             <th className="th">State</th>
             <th className="th text-right">Score</th>
-            <th className="th text-right">Rank</th>
+            <th className="th hidden text-right md:table-cell">Rank</th>
             <th className="th text-right">Price</th>
             <th className="th text-right">Day chg</th>
             <th className="th text-right">vs VWAP</th>
-            <th className="th text-right">EMA spread</th>
-            <th className="th text-right">Rel vol</th>
+            <th className="th hidden text-right xl:table-cell">EMA spread</th>
+            <th className="th hidden text-right md:table-cell">Rel vol</th>
             <th className="th text-right" title="Wilder RSI-14 on today's 5-minute closes, judged against the live trend — the reading the entry alert fires on">
               RSI 5m
             </th>
-            <th className="th text-right" title="Daily / weekly RSI-14 from the last completed daily bar — the nightly pair, not today's tape">
+            <th className="th hidden text-right lg:table-cell" title="Daily / weekly RSI-14 from the last completed daily bar — the nightly pair, not today's tape">
               RSI D/W
             </th>
-            <th className="th text-right">vs high</th>
+            <th className="th hidden text-right xl:table-cell">vs high</th>
             <th className="th">Candle</th>
             <th className="th">Why</th>
           </tr>
@@ -85,7 +85,7 @@ export function WatchlistTable({
                   </div>
                 </td>
                 {sparklines ? (
-                  <td className="td">
+                  <td className="td hidden lg:table-cell">
                     <Sparkline
                       values={sparklines[row.instrument_id]}
                       missing={`No 5-minute closes today for ${row.symbol ?? row.trading_symbol ?? "this symbol"}`}
@@ -103,7 +103,7 @@ export function WatchlistTable({
                   ) : null}
                 </td>
                 <td className="td num text-right font-semibold">{score(row.latest_score)}</td>
-                <td className="td num text-right">
+                <td className="td hidden num text-right md:table-cell">
                   {row.latest_rank === null ? (
                     <span title="Ranks are assigned by the initial scan; a symbol that qualifies later is unranked">
                       —
@@ -123,13 +123,13 @@ export function WatchlistTable({
                   {pct(row.distance_from_vwap_pct)}
                   <div className="num text-[11px] text-muted">{row.vwap === null ? "" : `vwap ${price(row.vwap)}`}</div>
                 </td>
-                <td className={`td num text-right ${tone(row.ema_spread_pct)}`}>
+                <td className={`td hidden num text-right xl:table-cell ${tone(row.ema_spread_pct)}`}>
                   {pct(row.ema_spread_pct)}
                   <div className="num text-[11px] text-muted">
                     {row.ema9 === null || row.ema20 === null ? "" : `${price(row.ema9)} / ${price(row.ema20)}`}
                   </div>
                 </td>
-                <td className="td num text-right">
+                <td className="td hidden num text-right md:table-cell">
                   <span className={row.relative_volume !== null && row.relative_volume >= 1.5 ? "text-positive" : ""}>
                     {multiple(row.relative_volume)}
                   </span>
@@ -146,7 +146,7 @@ export function WatchlistTable({
                     <RsiStateBadge state={row.rsi_state} />
                   </div>
                 </td>
-                <td className={`td num text-right ${biasTone(row.rsi_bias)}`}>
+                <td className={`td hidden num text-right lg:table-cell ${biasTone(row.rsi_bias)}`}>
                   {row.daily_rsi === null && row.weekly_rsi === null ? (
                     <span className="text-muted" title="No daily/weekly RSI synced for this symbol yet">
                       —
@@ -158,7 +158,7 @@ export function WatchlistTable({
                     <RsiBiasBadge bias={row.rsi_bias} />
                   </div>
                 </td>
-                <td className={`td num text-right ${tone(row.distance_from_high_pct)}`}>
+                <td className={`td hidden num text-right xl:table-cell ${tone(row.distance_from_high_pct)}`}>
                   {pct(row.distance_from_high_pct)}
                   <div className="num text-[11px] text-muted">{row.session_high === null ? "" : `H ${price(row.session_high)}`}</div>
                 </td>

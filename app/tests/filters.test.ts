@@ -4,11 +4,13 @@ import {
   SIGNAL_TYPES,
   filterOrbViews,
   filterStocksByBias,
+  filterWatchlistByState,
   parseOrbStatusFilter,
   parseSignalType,
   parseStockBiasFilter,
+  parseWatchlistStateFilter,
 } from "@/lib/filters";
-import type { OrbRow, OrbView, RsiBias, StockOverviewRow } from "@/lib/types";
+import type { OrbRow, OrbView, RsiBias, StockOverviewRow, WatchlistRow, WatchlistState } from "@/lib/types";
 
 /** Fixtures carry only what the filters read; the rest is honestly blank. */
 function stock(symbol: string, bias: RsiBias): StockOverviewRow {
@@ -174,4 +176,98 @@ test("CONFIRMED needs all three filters — a breakout with an unknown EMA stays
     filterOrbViews(VIEWS, "CONFIRMED").map((v) => v.row.symbol),
     ["UP1"],
   );
+});
+
+// ── the watchlist's state chips ─────────────────────────────────────────────
+
+/** A membership carrying only what the state filter reads. */
+function member(symbol: string, state: WatchlistState): WatchlistRow {
+  return {
+    watchlist_id: 1,
+    trading_session_id: 1,
+    trading_date: "2026-10-12",
+    instrument_id: 1,
+    symbol,
+    trading_symbol: `${symbol}-EQ`,
+    company_name: null,
+    exchange: "NSE",
+    current_state: state,
+    initial_entry_at: null,
+    latest_state_change_at: null,
+    initial_entry_price: null,
+    latest_price: null,
+    latest_score: null,
+    latest_rank: null,
+    removal_reason: null,
+    consecutive_weak_candles: 0,
+    episode_count: 1,
+    is_active: state !== "REMOVED",
+    is_simulated: false,
+    vwap: null,
+    ema9: null,
+    ema20: null,
+    relative_volume: null,
+    intraday_change_pct: null,
+    distance_from_vwap_pct: null,
+    ema_spread_pct: null,
+    session_high: null,
+    session_low: null,
+    distance_from_high_pct: null,
+    bullish_qualified: false,
+    reasons: [],
+    failed_reasons: [],
+    data_quality: null,
+    warming_up: false,
+    latest_candle_at: null,
+    indicator_snapshot_id: null,
+    daily_rsi: null,
+    weekly_rsi: null,
+    rsi_bias: null,
+    rsi_5m: null,
+    rsi_state: null,
+  };
+}
+
+const MEMBERS: WatchlistRow[] = [
+  member("ACT", "ACTIVE"),
+  member("REQ", "REQUALIFIED"),
+  member("WEAK", "WEAKENING"),
+  member("FROZEN", "DATA_STALE"),
+  member("GONE", "REMOVED"),
+  member("WARM", "WARMING_UP"),
+];
+
+test("the state filter parses case-insensitively; anything unknown is ALL", () => {
+  assert.equal(parseWatchlistStateFilter("tracked"), "TRACKED");
+  assert.equal(parseWatchlistStateFilter("Removed"), "REMOVED");
+  assert.equal(parseWatchlistStateFilter(["weakening", "removed"]), "WEAKENING");
+  assert.equal(parseWatchlistStateFilter("wat"), "ALL");
+  assert.equal(parseWatchlistStateFilter(undefined), "ALL");
+});
+
+test("TRACKED is the present-and-qualified pair, nothing else", () => {
+  assert.deepEqual(
+    filterWatchlistByState(MEMBERS, "TRACKED").map((row) => row.symbol),
+    ["ACT", "REQ"],
+  );
+});
+
+test("WEAKENING groups the degraded-but-present states, DATA_STALE included", () => {
+  assert.deepEqual(
+    filterWatchlistByState(MEMBERS, "WEAKENING").map((row) => row.symbol),
+    ["WEAK", "FROZEN"],
+  );
+});
+
+test("WARMING_UP belongs to no cut but ALL — it has not produced a verdict yet", () => {
+  assert.deepEqual(
+    filterWatchlistByState(MEMBERS, "ALL").map((row) => row.symbol),
+    ["ACT", "REQ", "WEAK", "FROZEN", "GONE", "WARM"],
+  );
+  const cuts = new Set(
+    ["TRACKED", "WEAKENING", "REMOVED"].flatMap((state) =>
+      filterWatchlistByState(MEMBERS, state as "TRACKED" | "WEAKENING" | "REMOVED").map((row) => row.symbol),
+    ),
+  );
+  assert.ok(!cuts.has("WARM"), "a warming row must not be counted as tracked, weakening, or removed");
 });

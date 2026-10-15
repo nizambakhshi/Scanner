@@ -154,7 +154,7 @@ export default async function AlertsPage() {
           <li className="border-l-2 border-line-2 pl-3">
             Every rule writes a <span className="num">signals</span> row whether or not it paged: a cooldown-suppressed
             break is still evidence, and{" "}
-            <Link href="/signals" className="link">
+            <Link href="/watchlist#alerts" className="link">
               the alert feed
             </Link>{" "}
             shows each row&rsquo;s delivery state next to it.

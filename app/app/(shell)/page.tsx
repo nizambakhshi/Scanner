@@ -249,8 +249,8 @@ export default async function BoardPage() {
         title="Recent alerts"
         hint="signals with their delivery state"
         action={
-          <Link href="/signals" className="link text-[12px]">
-            Full feed →
+          <Link href="/watchlist#alerts" className="link text-[12px]">
+            Today&rsquo;s feed →
           </Link>
         }
       >

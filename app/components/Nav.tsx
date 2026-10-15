@@ -10,10 +10,8 @@ import { sessionClock, type SessionPhase } from "@/lib/market-clock";
 const LINKS = [
   { href: "/", label: "Board" },
   { href: "/watchlist", label: "Watchlist" },
-  { href: "/stocks", label: "Stocks" },
   { href: "/strategy", label: "Strategy" },
   { href: "/alerts", label: "Alert rules" },
-  { href: "/signals", label: "Alert feed" },
   { href: "/history", label: "Days" },
   { href: "/health", label: "Health" },
   { href: "/config", label: "Config" },
@@ -26,7 +24,7 @@ export function Nav({ email }: { email: string }) {
   return (
     <header className="sticky top-0 z-20 border-b border-line bg-surface/95 backdrop-blur">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2.5">
-        <Link href="/" className="flex shrink-0 items-baseline gap-2">
+        <Link href="/" className="flex w-full shrink-0 items-baseline gap-2 sm:w-auto">
           <span className="font-serif text-[19px] italic leading-none tracking-tight">Bullish Scanner</span>
           <span className="font-display hidden text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-2 lg:inline">
             NSE · 1m
@@ -53,13 +51,13 @@ export function Nav({ email }: { email: string }) {
           })}
         </nav>
 
-        <div className="flex items-center gap-3">
+        <div className="flex w-full flex-wrap items-center gap-x-3 gap-y-2 xl:w-auto">
           <SessionStrip />
           <div className="flex items-center gap-1.5">
             <ThemeToggle />
             <RefreshButton />
           </div>
-          <span className="hidden max-w-[180px] truncate text-[12px] text-muted md:inline" title={email}>
+          <span className="hidden max-w-[180px] truncate text-[12px] text-muted 2xl:inline" title={email}>
             {email}
           </span>
           <SignOutButton />
