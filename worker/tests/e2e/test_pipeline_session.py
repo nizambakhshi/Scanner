@@ -157,6 +157,40 @@ class Session:
             # the one due minute (§7.3: processed by time, never by a later tick)
             await self.pipeline.drain(minute(mi + 1, second=4))
 
+    async def _emit(self, iid: int, mi: int, *, second: int, price: float) -> None:
+        token = self.pipeline.instruments[iid].instrument_token
+        await self.pipeline.on_tick(
+            tick(instrument_id=iid, token=token, price=price, offset_minutes=mi, second=second,
+                 cumulative_volume=self.cum[iid])
+        )
+
+    async def run_minutes_live(self, count: int) -> None:
+        """Drive ``count`` minutes the way the socket really behaves.
+
+        Unlike :meth:`run_minutes` — which drains *before* the next minute's
+        ticks arrive — every minute here is preempted: the successor's opening
+        print crosses the boundary inside the finished minute's grace window,
+        before the drain at +4s. That ordering is the point of the harness, so
+        neither this method nor the drains in it may be reordered to match the
+        gentler sequential cadence. The final minute has no successor print and
+        goes out through the forming-state path on its own.
+        """
+        for iid, rows in self.plans.items():
+            if rows:
+                self.cum[iid] += rows[0][2]
+                await self._emit(iid, 0, second=0, price=rows[0][0])
+        for mi in range(count):
+            for iid, rows in self.plans.items():
+                if mi >= len(rows):
+                    continue
+                _price_open, price_close, _vol = rows[mi]
+                await self._emit(iid, mi, second=30, price=price_close)
+                if mi + 1 < len(rows):
+                    self.cum[iid] += rows[mi + 1][2]
+                    await self._emit(iid, mi + 1, second=0, price=rows[mi + 1][0])
+            await self.pipeline.drain(minute(mi + 1, second=4))
+        self.next_minute = count
+
     async def stale(self, reason: str, now) -> None:
         await self.pipeline.on_feed_status(FeedStatus.STALE, reason, now=now)
 
@@ -265,6 +299,64 @@ async def test_exactly_one_candle_per_instrument_per_minute_derived_from_ticks()
     # draining again at the same instant finalizes nothing new (§7.3)
     await s.pipeline.drain(minute(6, second=4))
     assert len(s.store.candle_rows(1)) == 6, "re-draining the same minute must not duplicate candles"
+
+
+# ── §8 live cadence: the successor tick arrives before the drain ─────────────
+#
+# ``run_minutes`` drains at minute+1 + 4s *before* the next minute's ticks, which
+# was gentle enough to hide a delivery defect: in live operation a liquid
+# instrument prints again at the start of the next minute — inside the grace
+# window — and the rollover folded the finished minute away where no drain could
+# reach it. These two tests drive the same tapes as the ones above out of
+# ``run_minutes_live``, whose ordering is the socket's own.
+
+
+async def test_live_cadence_delivers_every_finished_minute_exactly_once():
+    rise, fall = inst(1, "RELIANCE"), inst(2, "HDFCBANK", previous_close=20.0)
+    s = await build([rise, fall], {1: rising_ticks(minutes=6), 2: falling_ticks(minutes=6, start=20.0)})
+    await s.connect()
+    await s.run_minutes_live(6)
+
+    for iid, plan in s.plans.items():
+        rows = s.store.candle_rows(iid)
+        assert len(rows) == 6, f"instrument {iid} must keep every preempted minute"
+        assert [candle.candle_start for candle in rows] == [minute(m) for m in range(6)]
+        for m, candle in enumerate(rows):
+            po, pc, vol = plan[m]
+            expected = tuple(round(value, 4) for value in (po, max(po, pc), min(po, pc), pc))
+            assert (candle.open, candle.high, candle.low, candle.close) == expected
+            assert candle.volume == vol, "volume is still the day-cumulative delta"
+            assert candle.is_complete is True
+            assert candle.data_quality is DataQuality.OK
+
+    assert len(s.store.snapshots) == 12, "every delivered candle carries its snapshot"
+    await s.pipeline.drain(minute(6, second=4))
+    assert len(s.store.candle_rows(1)) == 6, "re-draining after the live day must not duplicate"
+    assert len(s.store.candle_rows(2)) == 6
+
+
+async def test_live_cadence_watchlist_outcome_is_identical_to_the_sequential_day():
+    # Same tape as test_rising_high_volume_instrument_reaches_active_watchlist_and_mints_entry
+    # above; the qualification run is carried by the minutes the preemption used
+    # to destroy, so under the defect the day has *no* membership and no signals
+    # at all instead of one entry episode.
+    rise, fall = inst(1, "RELIANCE"), inst(2, "TATASTEEL", previous_close=50.0)
+    s = await build([rise, fall], {1: rising_ticks(minutes=25), 2: falling_ticks(minutes=25)})
+    await s.connect()
+    await s.run_minutes_live(25)
+
+    membership = await s.store.get_membership(s.session_row.id, 1)
+    assert membership is not None, "the rising spike-volume stock must be on the watchlist"
+    assert membership.current_state is WatchlistState.ACTIVE
+
+    entries = s.signals_of(SignalType.BULLISH_ENTRY, instrument_id=1)
+    assert len(entries) == 1, "one entry alert per qualifying episode (§12.1)"
+    assert entries[0].candle_start == minute(22), "the RV spike candle is the qualifying candle"
+    assert len(s.signals_of(SignalType.WATCHLIST_ADDED, instrument_id=1)) == 1
+
+    assert s.signals_of(SignalType.BULLISH_ENTRY, instrument_id=2) == []
+    assert await s.store.get_membership(s.session_row.id, 2) is None
+    assert s.pipeline.counters.signals_raised == 1
 
 
 # ── §9: indicator snapshots on every finalized candle ────────────────────────

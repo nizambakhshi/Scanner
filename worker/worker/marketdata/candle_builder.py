@@ -102,6 +102,10 @@ class CandleEngine:
         self.max_seen_signatures = max_seen_signatures
         self._states: dict[int, _InstrumentState] = {}
         self._finalized: dict[int, dict[datetime, Candle]] = {}
+        # Minutes a later tick rolled over early (see ``_flush_state``): finished,
+        # but not yet deliverable — ``finalize_due`` releases them on the clock,
+        # so a successor tick can never make a candle unreachable.
+        self._pending: dict[int, dict[datetime, Candle]] = {}
         self._gaps: list[CandleGap] = []
         self.stats = EngineStats()
 
@@ -232,13 +236,16 @@ class CandleEngine:
 
     # ── finalization ────────────────────────────────────────────────────────
     def finalize_due(self, now: datetime) -> list[Candle]:
-        """Finalize candles whose boundary + grace has passed.
+        """Deliver every candle whose boundary + grace has passed.
 
-        A candle is complete only when *time* has moved past its minute plus the
-        grace period — never because "a later tick arrived" (spec §7.3).
+        Two places can hold a finished minute: the pending map (minutes a later
+        tick rolled over early) and the forming state. Both are released by the
+        same clock rule, so delivery happens because *time* moved past the
+        minute plus the grace period — never because "a later tick arrived"
+        (spec §7.3) — and a rolled-over minute can never be lost on the way.
         """
         reference = to_ist(now)
-        ready: list[Candle] = []
+        ready = self._take_pending(reference)
         for instrument_id, state in list(self._states.items()):
             if state.bucket_start is None or state.tick_count == 0:
                 continue
@@ -250,8 +257,9 @@ class CandleEngine:
         return ready
 
     def finalize_all(self, now: datetime) -> list[Candle]:
-        """End-of-session flush: finalize everything still forming."""
-        ready: list[Candle] = []
+        """End-of-session flush: deliver everything not yet delivered — minutes
+        waiting in the pending map and everything still forming."""
+        ready = self._take_pending(None)
         for instrument_id, state in list(self._states.items()):
             if state.bucket_start is None or state.tick_count == 0:
                 continue
@@ -303,6 +311,24 @@ class CandleEngine:
         return list(self._gaps)
 
     # ── internals ───────────────────────────────────────────────────────────
+    def _take_pending(self, reference: datetime | None) -> list[Candle]:
+        """Remove and return rolled-over minutes whose grace has passed.
+
+        Buckets come out oldest-first per instrument, so an instrument that
+        rolled over several minutes in a row is delivered in order; ``None``
+        (the close flush) takes everything regardless of the clock.
+        """
+        ready: list[Candle] = []
+        for instrument_id in sorted(self._pending):
+            by_bucket = self._pending[instrument_id]
+            for bucket in sorted(by_bucket):
+                if reference is not None and reference < bucket + timedelta(minutes=1) + self.grace:
+                    break
+                ready.append(by_bucket.pop(bucket))
+            if not by_bucket:
+                del self._pending[instrument_id]
+        return ready
+
     def _finalize_state(self, instrument_id: int, state: _InstrumentState) -> Candle | None:
         candle = self._build_candle(state)
         if candle is None:
@@ -322,12 +348,19 @@ class CandleEngine:
         return candle
 
     def _flush_state(self, state: _InstrumentState) -> None:
-        """Keep the finished bucket in the finalized map without grace semantics."""
+        """Finish the bucket a later tick rolled over, ahead of its grace deadline.
+
+        The candle is kept for the late-correction guard (``_finalized``) *and*
+        queued for delivery (``_pending``): it is one candle, and it still
+        arrives through ``finalize_due``/``finalize_all`` exactly once, on the
+        same clock rule as every other candle.
+        """
         if state.bucket_start is None or state.open is None or state.tick_count == 0:
             return
         candle = self._build_candle(state, complete=True)
         if candle is not None:
             self._finalized.setdefault(state.instrument_id, {})[state.bucket_start] = candle
+            self._pending.setdefault(state.instrument_id, {})[state.bucket_start] = candle
             self.stats.candles_finalized += 1
 
     def _build_candle(self, state: _InstrumentState, *, complete: bool = False) -> Candle | None:
