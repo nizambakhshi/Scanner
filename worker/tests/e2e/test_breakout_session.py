@@ -55,6 +55,28 @@ DAY_BREAK_BOARD_ONLY: dict[str, object] = {
 }
 
 
+def orb_retest_ticks() -> list[tuple[float, float, int]]:
+    """13 minutes planned around the 5-minute ORB buckets and the setup levels.
+
+    * minutes 0-4 (bucket 0) print 100.0→100.2: the opening range, high 100.2;
+    * minutes 5-9 (bucket 1) rally to a close of 101.8 — judged, and the range
+      broken, when minute 10 opens bucket 2 (the event is stamped minute 9);
+    * minute 11 dips to 100.1: inside the 0.5% band top 100.701, above the
+      failure line 99.699, closing below the level — a touch, not a reclaim;
+    * minute 12 closes 100.6, above the level: the reclaim.
+    """
+    flat = [(100.0, 100.2, 1000)] * 5
+    rally = [
+        (100.4, 100.6, 1000),
+        (100.6, 100.9, 1000),
+        (100.9, 101.2, 1000),
+        (101.2, 101.5, 1000),
+        (101.5, 101.8, 1000),
+    ]
+    retest = [(101.6, 101.3, 1000), (101.0, 100.1, 1000), (100.3, 100.6, 1000)]
+    return flat + rally + retest
+
+
 async def test_a_new_day_high_becomes_a_breakout_signal_and_a_telegram_push():
     rise, fall = inst(1, "RELIANCE"), inst(2, "TATASTEEL", previous_close=50.0)
     s = await build(
@@ -198,6 +220,40 @@ async def test_an_outage_suspends_level_breaks_while_the_candles_keep_storing():
     assert len(s.store.candle_rows(1)) == 24, "while the candles are still stored"
     assert s.pipeline.counters.breakouts_detected == before, (
         "the detector never saw the outage minutes"
+    )
+
+
+async def test_the_orb_retest_watch_rides_the_pipeline_and_stays_silent():
+    """The setup watch, end to end: the ORB break opens a leg, the reclaim closes it.
+
+    Phase 2C observes only — the reclaim moves ``retests_detected`` and mints
+    nothing; the ORB break itself remains the one alert on this tape.
+    """
+    s = await build(
+        [inst(1, "RELIANCE")],
+        {1: orb_retest_ticks()},
+        strategies=session_params(
+            orb={"min_volume_ratio": 0.0}, session_break=False, vwap=False, rsi=False
+        ),
+    )
+    await s.connect()
+    await s.run_minutes(11)  # through minute 10: the break is judged when bucket 2 opens
+
+    legs = s.pipeline.setups.legs_for(1)
+    assert len(legs) == 1, "the ORB break must open exactly one retest leg"
+    assert legs[0].level == 100.2, "the leg watches the opening-range high"
+    assert legs[0].break_candle_start == minute(9), "stamped with bucket 1's closing candle"
+    assert legs[0].bars_since_break == 0
+    assert s.pipeline.counters.retests_detected == 0
+    ups = s.signals_of(SignalType.BREAKOUT_UP, instrument_id=1)
+    assert len(ups) == 1, "the break is the one level-break alert on this tape"
+
+    await s.run_minutes(2)  # minutes 11 and 12: the touch, then the reclaim
+
+    assert s.pipeline.counters.retests_detected == 1
+    assert s.pipeline.setups.open_leg_count == 0, "one leg, one candidate: consumed"
+    assert len(s.signals_of(SignalType.BREAKOUT_UP, instrument_id=1)) == 1, (
+        "the reclaim is observed, never alerted — no second level-break row"
     )
 
 

@@ -503,6 +503,7 @@ async def build(options: SimulationOptions) -> Simulation:
             macd_fast_period=params.macd_fast_period,
             macd_slow_period=params.macd_slow_period,
             macd_signal_period=params.macd_signal_period,
+            atr_period=params.atr_period,
         ),
         watchlist=WatchlistManager(
             store=store, params=params, alerts=alerts, simulation=not options.dispatch

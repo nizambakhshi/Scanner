@@ -154,10 +154,21 @@ def test_macd_defaults_parsing_and_validation() -> None:
         C.ScannerParams(macd_signal_period=1).validate()
 
 
+def test_atr_defaults_parsing_and_validation() -> None:
+    defaults = C.ScannerParams.from_env({})
+    assert defaults.atr_period == 14
+    parsed = C.ScannerParams.from_env({"ATR_PERIOD": "7"})
+    assert parsed.atr_period == 7
+    parsed.validate()
+    with pytest.raises(C.ConfigError, match="ATR_PERIOD must be >= 2"):
+        C.ScannerParams(atr_period=1).validate()
+
+
 def test_scanner_config_public_shape_is_unchanged() -> None:
     # The config snapshot the heartbeat and dashboard consume keeps exactly the
-    # keys it had before Phase 2B: the MACD knobs live on the env side for now
-    # and must not leak into the public shape until the DB columns land.
+    # keys it had before Phases 2B/2C: the MACD and ATR knobs live on the env
+    # side for now and must not leak into the public shape until the DB columns
+    # land.
     assert set(C.ScannerParams().to_dict()) == {
         "universe",
         "fast_ema_period",

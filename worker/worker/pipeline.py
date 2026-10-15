@@ -25,6 +25,7 @@ from .alerts import AlertEngine
 from .analytics.breakouts import BreakoutEvent, BreakoutTracker, StrategiesConfig
 from .analytics.indicators import IndicatorRegistry
 from .analytics.scanner import ScanContext, Scanner
+from .analytics.setups import RetestCandidate, SetupTracker
 from .config import ScannerParams
 from .logging_setup import get_logger
 from .marketdata.candle_builder import CandleEngine
@@ -79,6 +80,10 @@ class PipelineCounters:
     #: strategy is running and being suppressed, rather than not running at all.
     breakouts_detected: int = 0
     breakouts_alerted: int = 0
+    #: Breakout-retests that reclaimed their level (worker.analytics.setups).
+    #: Observations only in this phase — no alert, no row — so the counter is the
+    #: evidence that the watch runs and finds its shapes, or honestly finds none.
+    retests_detected: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -91,6 +96,7 @@ class PipelineCounters:
             "stale_seconds_total": round(self.stale_seconds_total, 1),
             "breakouts_detected": self.breakouts_detected,
             "breakouts_alerted": self.breakouts_alerted,
+            "retests_detected": self.retests_detected,
         }
 
 
@@ -119,6 +125,11 @@ class ScannerPipeline:
     #: Runs the day-break / opening-range / VWAP detectors over every candle of
     #: the whole subscribed universe, not only the watchlist.
     breakouts: BreakoutTracker | None = field(default=None, repr=False)
+    #: Watches the ORB breaks the detector above raises for a retest of the level
+    #: (:class:`worker.analytics.setups.SetupTracker`). Observation only in this
+    #: phase: the pipeline feeds it so the watch is exercised end to end, and the
+    #: phases that score and alert on its candidates land next.
+    setups: SetupTracker | None = field(default=None, repr=False)
     _token_index: dict[str, int] = field(default_factory=dict, repr=False)
     _last_tick_at: dict[int, datetime] = field(default_factory=dict, repr=False)
     _last_exchange_ts: dict[int, datetime] = field(default_factory=dict, repr=False)
@@ -136,6 +147,7 @@ class ScannerPipeline:
         self.scanner = Scanner(self.params)
         self.strategies = self.strategies or StrategiesConfig()
         self.breakouts = BreakoutTracker(strategies=self.strategies, window=self.window)
+        self.setups = SetupTracker()
         for instrument in self.instruments.values():
             if instrument.instrument_token:
                 self._token_index[instrument.instrument_token] = instrument.id
@@ -383,6 +395,7 @@ class ScannerPipeline:
         # level and a streak out of nothing — so the row carries the last verdict the
         # trustworthy tape produced, the same treatment its EMA and VWAP get.
         events: list[BreakoutEvent] = []
+        retests: list[RetestCandidate] = []
         if self.feed_status not in OUTAGE_STATUSES:
             events = self.breakouts.on_candle(
                 candle,
@@ -392,6 +405,17 @@ class ScannerPipeline:
                 rsi_5m=values.rsi_5m,
                 trend=result.trend,
             )
+            # The retest watch rides the same trusted tape as the detectors. Open
+            # legs advance *before* this candle's events are handed over, so the
+            # candle that broke the level is judged at its close and never counts
+            # as its own first retest bar.
+            retests = self.setups.on_candle(
+                candle,
+                symbol=instrument.symbol,
+                relative_volume=values.relative_volume,
+            )
+            for event in events:
+                self.setups.on_break(event, atr=values.atr)
         snapshot = result.to_snapshot(
             trading_date=self.window.trading_date,
             config_version=self.params.config_version,
@@ -419,6 +443,7 @@ class ScannerPipeline:
         self.counters.breakouts_detected += await self._raise_breakouts(
             events, instrument=instrument
         )
+        self.counters.retests_detected += len(retests)
         outcome = await self.watchlist.on_candle(
             session_id=self.session.id,
             trading_date=self.window.trading_date,

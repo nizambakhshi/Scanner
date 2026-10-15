@@ -634,6 +634,7 @@ class WorkerRuntime:
             macd_fast_period=params.macd_fast_period,
             macd_slow_period=params.macd_slow_period,
             macd_signal_period=params.macd_signal_period,
+            atr_period=params.atr_period,
         )
         alerts = self._build_alerts()
         watchlist = WatchlistManager(

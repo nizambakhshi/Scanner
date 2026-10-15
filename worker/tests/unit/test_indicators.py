@@ -328,11 +328,12 @@ def test_a_bucket_whose_closing_minute_never_arrived_is_absent_not_filled():
     assert gapped.rsi.observations == 2
 
 
-def test_session_reset_clears_rsi_and_macd_but_keeps_ema_and_volume():
+def test_session_reset_clears_rsi_macd_and_atr_but_keeps_ema_and_volume():
     engine = macd_engine()
     feed_session(engine, range(20))
     assert engine.rsi.value is not None
     assert engine.macd.current.ready
+    assert engine.atr.value is not None
     before_fast = engine.fast.value
     before_slow = engine.slow.value
 
@@ -343,6 +344,7 @@ def test_session_reset_clears_rsi_and_macd_but_keeps_ema_and_volume():
     assert engine.macd.observations == 0
     assert engine.macd.current.macd is None and engine.macd.current.signal is None
     assert engine.macd.current.ready is False
+    assert engine.atr.value is None and engine.atr.observations == 0
     assert engine.fast.value == before_fast
     assert engine.slow.value == before_slow
     assert engine.volume.ready
@@ -480,3 +482,130 @@ def test_indicator_values_regression_pin_from_before_the_macd_phase():
     # 16 buckets have completed; the default MACD needs 26 — absent, not zero.
     assert mid.macd is None and end.macd is None
     assert end.macd_signal is None and end.macd_histogram is None
+
+
+# ── ATR inside the instrument engine (Phase 2C) ─────────────────────────────
+
+
+def atr_engine() -> InstrumentIndicators:
+    """Small periods so the ATR is warm within a handful of minutes."""
+    return InstrumentIndicators(
+        fast_period=3,
+        slow_period=5,
+        volume_lookback=3,
+        rsi_period=3,
+        macd_fast_period=2,
+        macd_slow_period=3,
+        macd_signal_period=2,
+        atr_period=3,
+    )
+
+
+def test_atr_rides_the_one_minute_stream_not_the_bucket_closes():
+    # Unlike the RSI/MACD (bucket closes only), the ATR advances on every
+    # completed minute: with period 3 it reads on the 3rd minute — twenty
+    # minutes before the first RSI bucket close could exist.
+    engine = atr_engine()
+    feed_session(engine, range(3))
+    values = engine.values(close=102.0)
+    assert engine.atr.observations == 3
+    assert values.atr is not None
+    assert engine.rsi.observations == 0 and values.rsi_5m is None
+    assert values.macd is None
+
+
+def test_warmup_candles_never_touch_the_atr():
+    # Prior-day candles seed EMA/volume only; the ATR describes today's tape.
+    engine = atr_engine()
+    for index in range(10):
+        engine.on_candle(
+            high=110 + index, low=90, close=100, volume=1000, in_current_session=False
+        )
+    assert engine.atr.observations == 0
+    assert engine.values(close=100.0).atr is None
+
+
+def test_session_reset_restarts_the_atr_from_the_new_session_only():
+    engine = atr_engine()
+    feed_session(engine, range(6))
+    assert engine.atr.value is not None
+
+    engine.reset_session_vwap()
+
+    assert engine.atr.value is None and engine.atr.observations == 0
+    # The next session's first true range is H−L, never a span against the
+    # previous session's last close: the engine must land exactly where a
+    # brand-new engine does on the same candles.
+    fresh = atr_engine()
+    for minute in range(3):
+        close = 200.0 + minute
+        kwargs = {"high": close + 2, "low": close - 2, "close": close, "volume": 1000}
+        engine.on_candle(**kwargs)
+        fresh.on_candle(**kwargs)
+    assert engine.atr.value == pytest.approx(fresh.atr.value)
+    assert engine.atr.observations == fresh.atr.observations == 3
+
+
+def test_engine_checkpoint_roundtrip_includes_atr():
+    engine = atr_engine()
+    feed_session(engine, range(6))
+    restored = InstrumentIndicators.from_dict(engine.to_dict())
+    assert restored.atr.observations == engine.atr.observations
+    for minute in range(6, 12):
+        close = 100.0 + minute
+        live = engine.on_candle(
+            high=close + 1,
+            low=close - 1,
+            close=close,
+            volume=1000 + minute,
+            candle_start=SESSION_OPEN + timedelta(minutes=minute),
+        )
+        replayed = restored.on_candle(
+            high=close + 1,
+            low=close - 1,
+            close=close,
+            volume=1000 + minute,
+            candle_start=SESSION_OPEN + timedelta(minutes=minute),
+        )
+    assert replayed.atr == pytest.approx(live.atr)
+
+
+def test_registry_carries_atr_period_and_serializes():
+    registry = IndicatorRegistry(fast_period=3, slow_period=5, volume_lookback=3, atr_period=7)
+    engine = registry.get(7)
+    assert engine.atr.period == 7
+    engine.on_candle(high=101, low=99, close=100, volume=10)
+
+    restored = IndicatorRegistry.from_dict(registry.to_dict())
+    assert restored.get(7).atr.period == 7  # existing state kept its period
+    newly = restored.get(8)  # engines built after the restore use registry periods
+    assert newly.atr.period == 7
+
+
+def test_legacy_registry_checkpoint_without_atr_keys():
+    registry = IndicatorRegistry(fast_period=3, slow_period=5, volume_lookback=3)
+    registry.get(1).on_candle(high=101, low=99, close=100, volume=10)
+    payload = registry.to_dict()
+    del payload["atr_period"]
+    payload["instruments"]["1"].pop("atr")
+    restored = IndicatorRegistry.from_dict(payload)
+    engine = restored.get(1)
+    assert engine.atr.period == 14  # defaults, not a crash
+    assert engine.atr.observations == 0
+    assert engine.candles_seen == 1  # the rest of the checkpoint came back
+
+
+def test_indicator_values_keep_the_pre_atr_constructor_shape():
+    # Callers that build IndicatorValues by hand keep working unchanged: the
+    # ATR field is optional and reads as absent.
+    values = IndicatorValues(
+        close=100.0,
+        vwap=None,
+        ema_fast=None,
+        ema_slow=None,
+        average_volume=None,
+        relative_volume=None,
+        candles_seen=0,
+        warm=False,
+    )
+    assert values.atr is None

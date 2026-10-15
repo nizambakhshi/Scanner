@@ -1,4 +1,5 @@
-"""Indicator engine: session VWAP, EMA(fast/slow), relative volume, 5-minute RSI, MACD.
+"""Indicator engine: session VWAP, EMA(fast/slow), relative volume, 5-minute RSI,
+MACD and the session ATR.
 
 Every calculation here is deterministic and pure: the same candle sequence
 produces the same numbers regardless of process restarts, worker count, or
@@ -16,6 +17,12 @@ The RSI-14 and the MACD are measured on **today's five-minute closes only** —
 the last 1-minute close of each bucket, the same partition the /strategy board
 builds in SQL — and neither is deliberately seeded from yesterday's tape. An
 intraday reading has to describe the move that is happening now.
+
+The ATR is measured on **today's one-minute candles** instead — it describes
+the size of the moves being made, minute by minute, which is the scale the
+setup engine's stop distance and extension checks read (see
+:mod:`worker.analytics.atr`). Both scopes reset together at the session
+boundary.
 """
 
 from __future__ import annotations
@@ -26,6 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from .atr import DEFAULT_ATR_PERIOD, AtrState
 from .ema import EmaState
 from .macd import DEFAULT_FAST_PERIOD, DEFAULT_SIGNAL_PERIOD, DEFAULT_SLOW_PERIOD, MacdState
 from .rsi import RSI_PERIOD, WilderRsi, closes_bucket
@@ -159,6 +167,12 @@ class IndicatorValues:
     macd: float | None = None
     macd_signal: float | None = None
     macd_histogram: float | None = None
+    #: Wilder ATR-14 on today's one-minute candles — the moves' own scale, the
+    #: input the setup engine's stop distance and extension measurement will
+    #: read (see :mod:`worker.analytics.atr`). ``None`` until the session's
+    #: 14th completed candle (~09:29 IST). Nothing consumes it yet (Phase 2C:
+    #: foundation only — no alert gate).
+    atr: float | None = None
 
 
 class InstrumentIndicators:
@@ -174,6 +188,7 @@ class InstrumentIndicators:
         macd_fast_period: int = DEFAULT_FAST_PERIOD,
         macd_slow_period: int = DEFAULT_SLOW_PERIOD,
         macd_signal_period: int = DEFAULT_SIGNAL_PERIOD,
+        atr_period: int = DEFAULT_ATR_PERIOD,
     ) -> None:
         if slow_period <= fast_period:
             raise ValueError("slow EMA period must exceed fast EMA period")
@@ -187,6 +202,7 @@ class InstrumentIndicators:
             slow_period=macd_slow_period,
             signal_period=macd_signal_period,
         )
+        self.atr = AtrState(period=atr_period)
         self.candles_seen = 0
         self.fast_period = fast_period
         self.slow_period = slow_period
@@ -221,6 +237,10 @@ class InstrumentIndicators:
             raise ValueError("candle volume must be nonnegative")
         if in_current_session:
             self.vwap.update(high, low, close, volume)
+            # The ATR rides the one-minute stream beside the VWAP: it measures
+            # the size of the moves as they happen, and restart recovery
+            # rebuilds it by replaying today's minutes through this same path.
+            self.atr.update(high=high, low=low, close=close)
             if candle_start is not None and closes_bucket(candle_start):
                 self.rsi.update(close)
                 # Same candle, same boundary: the MACD and the RSI-5m share one
@@ -252,14 +272,15 @@ class InstrumentIndicators:
             macd=self.macd.current.macd,
             macd_signal=self.macd.current.signal,
             macd_histogram=self.macd.current.histogram,
+            atr=self.atr.value,
         )
 
     def reset_session_vwap(self) -> None:
         """Called at each session boundary; EMA/volume history is preserved.
 
-        The five-minute RSI and the MACD reset with the VWAP rather than with
-        the EMA: all three measure *this* session, and yesterday's tape is not
-        today's dip.
+        The five-minute RSI, the MACD and the ATR reset with the VWAP rather
+        than with the EMA: all four measure *this* session, and yesterday's
+        tape is not today's dip.
         """
         self.vwap.reset()
         self.rsi = WilderRsi(period=self.rsi.period)
@@ -268,6 +289,7 @@ class InstrumentIndicators:
             slow_period=self.macd.slow_period,
             signal_period=self.macd.signal_period,
         )
+        self.atr = AtrState(period=self.atr.period)
 
     # ── warm-up + recovery ──────────────────────────────────────────────────
     def seed(self, candles: Iterable[Any], *, session_candles: bool = False) -> int:
@@ -301,6 +323,7 @@ class InstrumentIndicators:
             "volume": self.volume.to_dict(),
             "rsi": self.rsi.to_dict(),
             "macd": self.macd.to_dict(),
+            "atr": self.atr.to_dict(),
             "candles_seen": self.candles_seen,
         }
 
@@ -320,6 +343,9 @@ class InstrumentIndicators:
             # Absent on checkpoints written before the MACD existed: those
             # restore with a fresh state rather than a guessed history.
             engine.macd = MacdState.from_dict(payload["macd"])
+        if payload.get("atr"):
+            # Same contract as the MACD block above.
+            engine.atr = AtrState.from_dict(payload["atr"])
         for volume in payload["volume"].get("history", []):
             engine.volume.push(int(volume))
         engine.candles_seen = int(payload.get("candles_seen", 0))
@@ -338,6 +364,7 @@ class IndicatorRegistry:
         macd_fast_period: int = DEFAULT_FAST_PERIOD,
         macd_slow_period: int = DEFAULT_SLOW_PERIOD,
         macd_signal_period: int = DEFAULT_SIGNAL_PERIOD,
+        atr_period: int = DEFAULT_ATR_PERIOD,
     ) -> None:
         self.fast_period = fast_period
         self.slow_period = slow_period
@@ -345,6 +372,7 @@ class IndicatorRegistry:
         self.macd_fast_period = macd_fast_period
         self.macd_slow_period = macd_slow_period
         self.macd_signal_period = macd_signal_period
+        self.atr_period = atr_period
         self._engines: dict[int, InstrumentIndicators] = {}
 
     def get(self, instrument_id: int) -> InstrumentIndicators:
@@ -357,6 +385,7 @@ class IndicatorRegistry:
                 macd_fast_period=self.macd_fast_period,
                 macd_slow_period=self.macd_slow_period,
                 macd_signal_period=self.macd_signal_period,
+                atr_period=self.atr_period,
             )
             self._engines[instrument_id] = engine
         return engine
@@ -376,6 +405,7 @@ class IndicatorRegistry:
             "macd_fast_period": self.macd_fast_period,
             "macd_slow_period": self.macd_slow_period,
             "macd_signal_period": self.macd_signal_period,
+            "atr_period": self.atr_period,
             "instruments": {str(key): value.to_dict() for key, value in self._engines.items()},
         }
 
@@ -390,6 +420,8 @@ class IndicatorRegistry:
             macd_fast_period=int(payload.get("macd_fast_period", DEFAULT_FAST_PERIOD)),
             macd_slow_period=int(payload.get("macd_slow_period", DEFAULT_SLOW_PERIOD)),
             macd_signal_period=int(payload.get("macd_signal_period", DEFAULT_SIGNAL_PERIOD)),
+            # Same tolerance for the ATR.
+            atr_period=int(payload.get("atr_period", DEFAULT_ATR_PERIOD)),
         )
         for key, value in payload.get("instruments", {}).items():
             registry._engines[int(key)] = InstrumentIndicators.from_dict(value)
