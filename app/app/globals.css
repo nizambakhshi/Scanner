@@ -4,10 +4,12 @@
   A dark instrument board: the screen of a machine that is watching the market,
   not a page selling software.
 
-  The whole visual budget goes on legibility at a glance. One near-black ground,
-  one slightly lighter panel, hairline rules instead of shadows. Green and red
-  belong to direction only; amber means "check this"; the electric blue is the
-  only interactive hue.
+  The whole visual budget goes on legibility at a glance. One aubergine-black
+  ground, one slightly lighter plum panel, hairline rules under one soft tile
+  shadow. Green and red belong to direction only; amber is the house colour —
+  attention and interaction both speak in it — and indigo is the quiet voice
+  kept for simulated data. It is the Cadence palette from Desktop/LinkedIn
+  Automation, so the two boards read as one family.
 
   The night board below is the default. `html[data-theme="light"]` further down
   redraws the same instrument in daylight; the theme button in the chrome switches
@@ -96,27 +98,27 @@
 
 @theme {
   /* The value ladder, darkest to lightest. */
-  --color-surface-2: #0a0d12; /* the ground under the panels; recessed chips */
-  --color-surface: #10141b;   /* panel */
-  --color-hover: #161d28;     /* one step up from a panel — hover state */
+  --color-surface-2: #12101b; /* the ground under the panels; recessed chips */
+  --color-surface: #1a1727;   /* panel */
+  --color-hover: #211d31;     /* one step up from a panel — hover state */
 
-  /* Hairlines are the only structure; nothing floats on a shadow. */
-  --color-line: #1d242f;      /* card edge, row rule */
-  --color-line-2: #2b3442;    /* chips, inputs, hovered edges */
+  /* Hairlines carry the structure; the tile lift is a plain variable below. */
+  --color-line: #2b2640;      /* card edge, row rule */
+  --color-line-2: #3a3458;    /* chips, inputs, hovered edges */
 
   /* Text ladder. */
-  --color-ink: #e9eef5;       /* primary */
-  --color-ink-2: #b3bdc9;     /* secondary */
-  --color-muted: #6b7686;     /* labels, hints, axis text */
-  --color-muted-2: #4d5866;   /* the dimmest step — quiet marks only */
+  --color-ink: #f2eee4;       /* primary */
+  --color-ink-2: #a29bb8;     /* secondary */
+  --color-muted: #77708d;     /* labels, hints, axis text */
+  --color-muted-2: #5f5870;   /* the dimmest step — quiet marks only */
 
   /* Meaning, one hue each. */
-  --color-accent: #4c7dff;    /* links, focus — the only interactive hue */
-  --color-positive: #39d98a;  /* up, qualified, delivered */
-  --color-negative: #ff6161;  /* down, failed, stale */
-  --color-amber: #f5a524;     /* needs attention, not broken */
-  --color-sim: #a78bfa;       /* simulated data — violet, never a direction */
-  --color-ema9: #22d3ee;      /* the fast EMA line on the execution chart */
+  --color-accent: #f2a83e;    /* links, focus — the house amber */
+  --color-positive: #55c486;  /* up, qualified, delivered */
+  --color-negative: #ee7a6d;  /* down, failed, stale */
+  --color-amber: #f2a83e;     /* needs attention, not broken */
+  --color-sim: #5f6fc4;       /* simulated data — the night indigo, never a direction */
+  --color-ema9: #7fb3e8;      /* the fast EMA line on the execution chart */
 
   /* Plex Sans carries the prose and the stamps; the serif is the voice, used twice
      on a page at most. Plex Mono carries the math. `--font-display` is the same
@@ -130,38 +132,50 @@
 }
 
 /*
+  The tile lift, as a plain variable rather than a Tailwind shadow utility: a
+  generated utility bakes its value in at build time, and the same `.card` must
+  wear the night lift at night and the warm lift on paper. The day value sits in
+  the light block below.
+*/
+:root {
+  --shadow-card: 0 14px 34px -22px rgb(0 0 0 / 0.7);
+}
+
+/*
   The same board in daylight.
 
   Nothing here is an inversion of the dark values; it is the instrument redrawn on
-  paper. The hue family is kept — a cool blue-grey ground and blue-black ink — so
-  it is recognisably the same tool. Panels go to white because on a light ground
-  the ground must recede and the panel must be the brightest area, which is the
-  opposite of the night board. Every signal hue darkens until it carries at least
-  4.5:1 as text on white: the acid green and electric blue of the night board are
-  unreadable on paper, so they become evergreen, brick and cobalt. `muted-2` stays
-  the step furthest from the ink, which on paper means the palest.
+  warm paper. The hue family is kept — a cream ground and plum ink — so it is
+  recognisably the same tool. Panels go to the brightest cream because on a light
+  ground the ground must recede and the panel must be the brightest area, which is
+  the opposite of the night board. Every signal hue darkens until it carries at
+  least 4.5:1 as text on the panel: the soft green and pale amber of the night
+  board are unreadable on cream, so they become evergreen, brick and a deep
+  copper-amber. `muted-2` stays the step furthest from the ink, which on paper
+  means the palest.
 */
 html[data-theme="light"] {
   color-scheme: light;
 
-  --color-surface-2: #e7ecf3; /* the ground under the panels; recessed chips */
-  --color-surface: #ffffff;   /* panel */
-  --color-hover: #eff3f9;     /* one step of tint over a panel — hover state */
+  --color-surface-2: #efe9dc; /* the ground under the panels; recessed chips */
+  --color-surface: #fbf8f1;   /* panel */
+  --color-hover: #f4efe4;     /* one step of tint over a panel — hover state */
 
-  --color-line: #d9e0ea;      /* card edge, row rule */
-  --color-line-2: #bfcadc;    /* chips, inputs, hovered edges */
+  --color-line: #ddd4c2;      /* card edge, row rule */
+  --color-line-2: #c3b89f;    /* chips, inputs, hovered edges */
+  --shadow-card: 0 14px 30px -22px rgb(80 60 20 / 0.35);
 
-  --color-ink: #0d1620;       /* primary */
-  --color-ink-2: #3b4757;     /* secondary */
-  --color-muted: #5d6a7d;     /* labels, hints, axis text */
-  --color-muted-2: #8a97a9;   /* the dimmest step — quiet marks only, still ~3:1 */
+  --color-ink: #241f2e;       /* primary */
+  --color-ink-2: #5c5468;     /* secondary */
+  --color-muted: #857c90;     /* labels, hints, axis text */
+  --color-muted-2: #a49db3;   /* the dimmest step — quiet marks only, still ~3:1 */
 
-  --color-accent: #2c5fe0;    /* links, focus — the only interactive hue */
-  --color-positive: #087f46;  /* up, qualified, delivered */
-  --color-negative: #cf3220;  /* down, failed, stale */
-  --color-amber: #a76308;     /* needs attention, not broken */
-  --color-sim: #6a44d8;       /* simulated data — violet, never a direction */
-  --color-ema9: #00738f;      /* the fast EMA line on the execution chart */
+  --color-accent: #b0731a;    /* links, focus — the house amber */
+  --color-positive: #2f8f5b;  /* up, qualified, delivered */
+  --color-negative: #c8503f;  /* down, failed, stale */
+  --color-amber: #b0731a;     /* needs attention, not broken */
+  --color-sim: #4a55a0;       /* simulated data — the night indigo, never a direction */
+  --color-ema9: #3a76ad;      /* the fast EMA line on the execution chart */
 }
 
 html {
@@ -246,8 +260,12 @@ body {
     appearance: none;
     margin: 0;
   }
+  /* The Cadence tile: a 14px radius and one soft shadow, so a panel sits on
+     the ground instead of being drawn flat on it. */
   .card {
-    @apply rounded-lg border border-line bg-surface;
+    @apply border border-line bg-surface;
+    border-radius: 14px;
+    box-shadow: var(--shadow-card);
   }
   .panel-title {
     @apply flex items-baseline justify-between gap-3 border-b border-line px-4 py-3;
