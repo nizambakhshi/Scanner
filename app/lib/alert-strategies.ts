@@ -2,8 +2,8 @@
  * Alert-strategy configuration: the dashboard's mirror of
  * `worker/worker/analytics/breakouts.py`.
  *
- * The operator decides here what the worker judges every minute. Three
- * strategies, each with the same six tunables, stored as one JSONB document in
+ * The operator decides here what the worker judges every minute. Four
+ * strategies, each with the same eight fields, stored as one JSONB document in
  * `ops_settings['alert_strategies']` — the row the worker re-reads every 60 s,
  * so a save takes effect inside the running session without a restart.
  *
@@ -20,8 +20,10 @@
  * row lives in `alerts-store.ts`.
  */
 
+import type { SignalType } from "./types";
+
 /** Strategy keys, in display order. Must equal `STRATEGIES` in the worker. */
-export const STRATEGIES = ["session_break", "orb", "vwap"] as const;
+export const STRATEGIES = ["session_break", "orb", "vwap", "rsi"] as const;
 
 export type StrategyKey = (typeof STRATEGIES)[number];
 
@@ -32,6 +34,12 @@ export type StrategyParams = {
   min_volume_ratio: number;
   cooldown_minutes: number;
   telegram: boolean;
+  /** The operator's two RSI numbers. They belong to `rsi` alone, but the worker
+   *  carries them on the shared shape — one dataclass, one parser, one editor — so
+   *  every strategy stores and returns them. See `EDITABLE_FIELDS` for what the page
+   *  offers on each card. */
+  oversold: number;
+  overbought: number;
 };
 
 export type StrategiesDoc = {
@@ -54,19 +62,51 @@ export const FIELD_LIMITS: Record<ParamField, { min: number; max: number; step: 
   confirm_candles: { min: 1, max: 5, step: "1", integer: true },
   min_volume_ratio: { min: 0, max: 10, step: "0.1", integer: false },
   cooldown_minutes: { min: 0, max: 240, step: "1", integer: true },
+  // The worker bounds these only as a pair (`0 < oversold < overbought < 100`), so
+  // these limits are the input's guard rails, not the rule. `strategyProblems` owns
+  // the rule, in the worker's own words.
+  oversold: { min: 0, max: 100, step: "1", integer: false },
+  overbought: { min: 0, max: 100, step: "1", integer: false },
 };
 
+/** The two RSI levels: checked together, never as two independent ranges. */
+export const LEVEL_FIELDS: readonly ParamField[] = ["oversold", "overbought"];
+
+/** Every numeric field the shared shape carries, in the order the worker validates
+ *  them. The editor posts, diffs and range-checks this whole list — a field that is
+ *  not shown on a card is still stored, and a stored value the worker would refuse is
+ *  something the page has to catch before writing it. */
 export const PARAM_FIELDS: readonly ParamField[] = [
   "threshold_pct",
   "confirm_candles",
   "min_volume_ratio",
   "cooldown_minutes",
+  "oversold",
+  "overbought",
 ];
 
 /**
- * Defaults copied from `DEFAULTS` in the worker. They are the numbers the system
- * runs on when no row exists, so the page must show them as the current values —
- * a blank form that silently means 0.10% would be a lie about the running config.
+ * The fields each detector actually reads, and therefore the ones worth putting in
+ * front of the operator.
+ *
+ * `rsi` has no `threshold_pct` — the two RSI levels *are* its thresholds — and the
+ * three level detectors never look at `oversold`/`overbought`. The hidden fields stay
+ * in the document at their stored values: the worker's shape is shared, so dropping
+ * them from a save would reset another strategy's numbers to defaults.
+ */
+export const EDITABLE_FIELDS: Record<StrategyKey, readonly ParamField[]> = {
+  session_break: ["threshold_pct", "confirm_candles", "min_volume_ratio", "cooldown_minutes"],
+  orb: ["threshold_pct", "confirm_candles", "min_volume_ratio", "cooldown_minutes"],
+  vwap: ["threshold_pct", "confirm_candles", "min_volume_ratio", "cooldown_minutes"],
+  rsi: ["oversold", "overbought", "confirm_candles", "min_volume_ratio", "cooldown_minutes"],
+};
+
+/**
+ * Defaults copied from `DEFAULTS` in the worker (and from `StrategyParams`' own field
+ * defaults, which every strategy that ignores a level still carries). They are the
+ * numbers the system runs on when no row exists, so the page must show them as the
+ * current values — a blank form that silently means 0.10% would be a lie about the
+ * running config.
  */
 export const DEFAULT_PARAMS: Record<StrategyKey, StrategyParams> = {
   session_break: {
@@ -76,6 +116,8 @@ export const DEFAULT_PARAMS: Record<StrategyKey, StrategyParams> = {
     min_volume_ratio: 1.0,
     cooldown_minutes: 15,
     telegram: true,
+    oversold: 40,
+    overbought: 60,
   },
   orb: {
     enabled: true,
@@ -84,6 +126,8 @@ export const DEFAULT_PARAMS: Record<StrategyKey, StrategyParams> = {
     min_volume_ratio: 1.5,
     cooldown_minutes: 0,
     telegram: true,
+    oversold: 40,
+    overbought: 60,
   },
   vwap: {
     enabled: true,
@@ -92,6 +136,21 @@ export const DEFAULT_PARAMS: Record<StrategyKey, StrategyParams> = {
     min_volume_ratio: 1.0,
     cooldown_minutes: 10,
     telegram: true,
+    oversold: 40,
+    overbought: 60,
+  },
+  // The operator's own two numbers, and the only reason this strategy exists. Two
+  // buckets (ten minutes) rather than one, thirty minutes of cooldown, and no volume
+  // gate: the rule is about the quiet pullback, not about a crowd.
+  rsi: {
+    enabled: true,
+    threshold_pct: 0.0,
+    confirm_candles: 2,
+    min_volume_ratio: 0.0,
+    cooldown_minutes: 30,
+    telegram: true,
+    oversold: 40,
+    overbought: 60,
   },
 };
 
@@ -99,11 +158,12 @@ export const DEFAULT_PARAMS: Record<StrategyKey, StrategyParams> = {
  * Display copy. `what` restates the detector's rule in the operator's terms; the
  * field hints say what raising or lowering that particular number does, because
  * "threshold_pct" alone does not tell anyone that a day-high break on the high
- * itself is what every new high does anyway.
+ * itself is what every new high does anyway. Only the fields a strategy reads are
+ * hinted — see `EDITABLE_FIELDS`.
  */
 export const STRATEGY_COPY: Record<
   StrategyKey,
-  { label: string; what: string; direction: string; fieldHints: Record<ParamField, string>; telegramNote: string }
+  { label: string; what: string; direction: string; fieldHints: Partial<Record<ParamField, string>>; telegramNote: string }
 > = {
   session_break: {
     label: "Session high / low break",
@@ -141,12 +201,39 @@ export const STRATEGY_COPY: Record<
     },
     telegramNote: "Flapping is prevented by the band and the confirmation candles, not by the cooldown.",
   },
+  rsi: {
+    label: "RSI entry / overbought",
+    what: "Wilder RSI-14 on today's five-minute closes, judged against the trend the scanner already measures — close over the session VWAP with the fast EMA over the slow one is up, the reverse is down. Below the entry level while the trend is up is the green side; above the overbought level while the trend is down is the red one. An extreme the trend does not confirm is neutral, and the first verdict of a session is a baseline rather than news, as is falling back into the band. The state is judged at every bucket close whether or not this rule is armed: the switch governs the alert, never the measurement the board shows.",
+    direction: "Down = the entry dip (RSI_ENTRY), up = the overbought print (RSI_OVERBOUGHT).",
+    fieldHints: {
+      oversold:
+        "The green line, in RSI points. Below it while the trend is up is the dip the rule calls an entry. The worker needs 0 < oversold < overbought < 100, so this cannot pass the red line.",
+      overbought:
+        "The red line. Above it while the trend is down is an expensive print; the same number inside an up-trend is strength, and stays neutral.",
+      confirm_candles:
+        "Consecutive five-minute buckets on the same side before the alert — 2 is ten minutes of evidence, 1 lets a single printed low page.",
+      min_volume_ratio:
+        "Relative volume the confirming bucket must carry. 0 turns the gate off, and 0 is the default here: a pullback on thin volume is the setup, not a reason to doubt it.",
+      cooldown_minutes:
+        "Minutes before this strategy may page this stock again. 30 keeps an RSI that hugs the line in a slow drift down to one piece of news.",
+    },
+    telegramNote: "The volume gate ships off: this rule is about where the pullback landed, not about who was trading it.",
+  },
 };
 
-/** Which signal type each direction raises, for display next to the switch. */
-export const SIGNAL_TYPE_FOR_DIRECTION: Record<"UP" | "DOWN", string> = {
-  UP: "BREAKOUT_UP",
-  DOWN: "BREAKDOWN",
+/**
+ * Which signal type each direction of each strategy writes.
+ *
+ * The three level detectors report a *level* crossing, and the direction says which
+ * way it went — `BREAKOUT_UP` / `BREAKDOWN`. `rsi` reports which side of the
+ * operator's band a reading landed on, so its green side is the one that pages on a
+ * **down** direction: an entry is a dip, and the worker's own mapping says so.
+ */
+export const SIGNAL_TYPE_FOR_DIRECTION: Record<StrategyKey, { UP: SignalType; DOWN: SignalType }> = {
+  session_break: { UP: "BREAKOUT_UP", DOWN: "BREAKDOWN" },
+  orb: { UP: "BREAKOUT_UP", DOWN: "BREAKDOWN" },
+  vwap: { UP: "BREAKOUT_UP", DOWN: "BREAKDOWN" },
+  rsi: { UP: "RSI_OVERBOUGHT", DOWN: "RSI_ENTRY" },
 };
 
 /**
@@ -160,21 +247,17 @@ export function strategyLabel(key: string): string | null {
 }
 
 export function defaultStrategies(): StrategiesDoc {
-  return {
-    version: DOC_VERSION,
-    strategies: {
-      session_break: { ...DEFAULT_PARAMS.session_break },
-      orb: { ...DEFAULT_PARAMS.orb },
-      vwap: { ...DEFAULT_PARAMS.vwap },
-    },
-  };
+  const strategies = {} as Record<StrategyKey, StrategyParams>;
+  for (const key of STRATEGIES) strategies[key] = { ...DEFAULT_PARAMS[key] };
+  return { version: DOC_VERSION, strategies };
 }
 
 export function isStrategyKey(value: string): value is StrategyKey {
   return (STRATEGIES as readonly string[]).includes(value);
 }
 
-/** `StrategiesConfig.to_dict()` — one strategy's six fields. */
+/** `StrategyParams.to_dict()` — the whole shared shape, including the two levels a
+ *  strategy may not read. */
 export function cloneParams(params: StrategyParams): StrategyParams {
   return { ...params };
 }
@@ -210,6 +293,10 @@ export function strategyProblems(key: StrategyKey, params: StrategyParams): stri
   const label = STRATEGY_COPY[key].label;
   const found: string[] = [];
   for (const field of PARAM_FIELDS) {
+    // The two RSI levels have no range of their own in the worker; they are checked
+    // as an ordered pair below, so a card that hides them cannot be blamed for a
+    // value it never offered.
+    if (LEVEL_FIELDS.includes(field)) continue;
     const limits = FIELD_LIMITS[field];
     const value = params[field];
     if (!Number.isFinite(value)) {
@@ -219,6 +306,13 @@ export function strategyProblems(key: StrategyKey, params: StrategyParams): stri
     if (value < limits.min || value > limits.max) {
       found.push(`${label}: ${field} must be between ${limits.min} and ${limits.max}`);
     }
+  }
+  // `0 < oversold < overbought < 100`, in the worker's own words: a level rule that
+  // reads as one sentence is a rule an operator can fix in one go, and a strategy
+  // that ignores the levels still has to carry a legal pair.
+  const { oversold, overbought } = params;
+  if (!(Number.isFinite(oversold) && Number.isFinite(overbought) && 0 < oversold && oversold < overbought && overbought < 100)) {
+    found.push(`${label}: oversold/overbought must be 0 < oversold < overbought < 100`);
   }
   return found;
 }
@@ -275,6 +369,8 @@ export function parseStrategies(payload: unknown): Parsed {
         min_volume_ratio: asNumber(fields.min_volume_ratio, defaults.min_volume_ratio),
         cooldown_minutes: asInt(fields.cooldown_minutes, defaults.cooldown_minutes),
         telegram: asBool(fields.telegram, defaults.telegram),
+        oversold: asNumber(fields.oversold, defaults.oversold),
+        overbought: asNumber(fields.overbought, defaults.overbought),
       };
     } catch (error) {
       problems.push(`${STRATEGY_COPY[key].label}: ${error instanceof Error ? error.message : String(error)}`);
@@ -373,11 +469,15 @@ export function strategiesDiff(
 export function strategiesAdvisories(doc: StrategiesDoc): string[] {
   const notes: string[] = [];
   if (!STRATEGIES.some((key) => doc.strategies[key].enabled)) {
-    notes.push("All three detectors are switched off — the board will keep computing, but no level break will be raised.");
+    notes.push("All four detectors are switched off — the board will keep computing, but no alert will be raised.");
   }
   for (const key of STRATEGIES) {
     const params = doc.strategies[key];
-    if (params.enabled && params.telegram && params.min_volume_ratio <= 0 && key !== "orb") {
+    // Two strategies ship without a volume gate on purpose — ORB keeps the strategy
+    // board's own bucket-volume criterion, and the entry rule is *about* the quiet
+    // pullback — so for those two an off gate is the setting, not an oversight.
+    if (key === "orb" || key === "rsi") continue;
+    if (params.enabled && params.telegram && params.min_volume_ratio <= 0) {
       notes.push(
         `${STRATEGY_COPY[key].label}: the volume gate is off, so a thin poke past the level will page your phone.`,
       );

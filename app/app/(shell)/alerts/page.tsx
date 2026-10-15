@@ -13,8 +13,10 @@ export const dynamic = "force-dynamic";
 /**
  * The alert rules the running worker obeys.
  *
- * Three level detectors, each with its own threshold, volume evidence, cooldown
- * and phone-call switch, plus where the pages are sent. This page writes
+ * Four rules — three that watch a *level* (the session high/low, the opening range,
+ * the session VWAP) and one that watches the five-minute RSI against the live trend —
+ * each with its own confirmation count, volume evidence, cooldown and phone-call
+ * switch, plus where the pages are sent. This page writes
  * `ops_settings`; the worker re-reads that row every 60 seconds and applies what
  * changed *inside the current session* — which is what makes it different from
  * `/config`, whose versioned row is only adopted when the next session opens.
@@ -61,7 +63,7 @@ export default async function AlertsPage() {
                 {strategyState.source === "saved" ? "saved rules" : "built-in defaults"}
               </span>
               <span className="chip border-line bg-surface text-muted">
-                <span className="num">{armed}</span> of 3 armed
+                <span className="num">{armed}</span> of {STRATEGIES.length} armed
               </span>
             </>
           ) : null
@@ -190,7 +192,7 @@ export default async function AlertsPage() {
             worker&rsquo;s dispatcher, sized for one sender.
           </li>
           <li className="border-l-2 border-line-2 pl-3">
-            No per-stock watch. All three detectors run on the whole configured universe, which is why a break on a
+            No per-stock watch. All four rules run on the whole configured universe, which is why a break on a
             symbol that never qualified still appears here — the count above each rule is what actually fired today.
           </li>
         </ul>

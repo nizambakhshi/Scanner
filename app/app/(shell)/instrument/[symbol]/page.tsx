@@ -2,7 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Panel, Metric, ErrorNote, Empty, PageHeading } from "@/components/ui";
 import { SimChip } from "@/components/SimulatedBanner";
-import { RsiBiasBadge, StateBadge, rsiBandTone } from "@/components/badges";
+import { RsiBiasBadge, RsiStateBadge, StateBadge, rsiBandTone } from "@/components/badges";
 import { CandleChart } from "@/components/CandleChart";
 import { EventTimeline } from "@/components/EventTimeline";
 import { SignalsTable } from "@/components/SignalsTable";
@@ -89,7 +89,7 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
         }
       />
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-7">
         <Metric
           label="Last"
           value={last ? price(last.close) : "—"}
@@ -119,10 +119,16 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
           hint={last?.rank ? `initial rank ${last.rank}` : "unranked — ranks come from the initial scan only"}
         />
         <Metric
+          label="RSI 5m"
+          value={last ? rsi(last.rsi_5m) : "—"}
+          hint={last ? stateHint(last.rsi_state) : "no snapshot"}
+          tone={last?.rsi_state === "ENTRY" ? "positive" : last?.rsi_state === "OVERBOUGHT" ? "negative" : "neutral"}
+        />
+        <Metric
           label="RSI daily / weekly"
           value={overview ? `${rsi(overview.daily_rsi)} / ${rsi(overview.weekly_rsi)}` : "—"}
           hint={overview ? biasHint(overview.rsi_bias) : "no daily/weekly reading synced"}
-          tone={overview?.rsi_bias === "BULLISH" ? "positive" : overview?.rsi_bias === "BEARISH" ? "negative" : "neutral"}
+          tone={overview?.rsi_bias === "ENTRY" ? "positive" : overview?.rsi_bias === "OVERBOUGHT" ? "negative" : "neutral"}
         />
       </div>
 
@@ -250,10 +256,29 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
         </Panel>
 
         <Panel
-          title="Two-timeframe RSI"
-          hint="the last seven readings per timeframe — what the RSI alerts classify"
-          action={overview ? <RsiBiasBadge bias={overview.rsi_bias} /> : null}
+          title="RSI — five-minute, daily, weekly"
+          hint="one rule on two horizons: under 40 is the green side, over 60 the red one"
+          action={
+            <span className="flex items-center gap-1.5">
+              <RsiStateBadge state={last?.rsi_state ?? null} reading={last?.rsi_5m ?? null} />
+              {overview ? <RsiBiasBadge bias={overview.rsi_bias} /> : null}
+            </span>
+          }
         >
+          {/* The intraday verdict has no history table of its own because it is not a
+              synced series: it is the reading on the snapshot the worker just wrote, and
+              the per-candle list below is its history. */}
+          <p className="border-b border-line px-4 py-2 text-[12px] leading-snug text-muted">
+            {last && last.rsi_5m !== null ? (
+              <>
+                Five-minute RSI measured on <span className="num">{clock(last.candle_start_at)}</span> — Wilder RSI-14
+                over today&rsquo;s 5-minute closes, judged against the live trend (close over session VWAP, fast EMA over slow
+                EMA). Under 40 while the trend is up is an entry; above 60 while it is down is overbought.
+              </>
+            ) : (
+              "No five-minute reading yet — the series needs fifteen buckets, and a verdict is taken only when one closes."
+            )}
+          </p>
           <div className="grid gap-4 px-4 py-3 sm:grid-cols-2">
             <RsiReadings
               heading="Daily"
@@ -267,8 +292,9 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
             />
           </div>
           <p className="border-t border-line px-4 py-2 text-[11px] leading-snug text-muted">
-            Wilder RSI-14 on adjusted closes. BULLISH needs both timeframes above 60, BEARISH both below 40; anything
-            else is neutral. A dash means fewer bars than the 14-period warmup needs — not a reading of zero.
+            The daily and weekly columns are Wilder RSI-14 on adjusted closes: ENTRY needs both timeframes below 40,
+            OVERBOUGHT both above 60; anything else is neutral. A dash means fewer bars than the 14-period warmup needs
+            — not a reading of zero.
           </p>
         </Panel>
       </div>
@@ -293,6 +319,12 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
                   <th className="th text-right">Rel vol</th>
                   <th className="th text-right">Chg</th>
                   <th className="th text-right">Score</th>
+                  <th
+                    className="th text-right"
+                    title="Wilder RSI-14 on the last five-minute bucket close at or before this candle, and the verdict taken there"
+                  >
+                    RSI 5m
+                  </th>
                   <th className="th">Quality</th>
                 </tr>
               </thead>
@@ -312,6 +344,12 @@ export default async function InstrumentPage({ params }: { params: Promise<{ sym
                         {pct(snapshot.intraday_change_pct)}
                       </td>
                       <td className="td num text-right">{score(snapshot.score)}</td>
+                      <td className={`td num text-right ${rsiBandTone(snapshot.rsi_5m)}`}>
+                        {rsi(snapshot.rsi_5m)}
+                        {snapshot.rsi_state ? (
+                          <span className="ml-1 text-[11px] text-muted">{snapshot.rsi_state.toLowerCase()}</span>
+                        ) : null}
+                      </td>
                       <td className="td">
                         <span className={snapshot.data_quality_status === "OK" ? "text-muted" : "text-amber"}>
                           {orDash(snapshot.data_quality_status)}
@@ -388,8 +426,17 @@ function RsiReadings({
 }
 
 function biasHint(bias: RsiBias): string {
-  if (bias === "BULLISH") return "both timeframes above 60";
-  if (bias === "BEARISH") return "both timeframes below 40";
+  if (bias === "ENTRY") return "both timeframes under 40";
+  if (bias === "OVERBOUGHT") return "both timeframes above 60";
   if (bias === "NEUTRAL") return "not on the same side of the 40–60 band";
   return "not classified yet";
+}
+
+/** The intraday tile's hint: the reading alone is not the verdict, so the sentence
+ *  has to carry the trend the rule judged it against. */
+function stateHint(state: RsiBias): string {
+  if (state === "ENTRY") return "under 40 while the trend is up";
+  if (state === "OVERBOUGHT") return "above 60 while the trend is down";
+  if (state === "NEUTRAL") return "inside the band, or an extreme the trend denies";
+  return "no bucket closed yet";
 }

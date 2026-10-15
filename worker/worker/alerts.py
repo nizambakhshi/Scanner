@@ -52,11 +52,16 @@ PUSHED_SIGNAL_TYPES = {
     SignalType.DATA_FEED_INTERRUPTED,
     SignalType.DATA_FEED_RECOVERED,
     SignalType.DAILY_SCAN_COMPLETE,
-    # Two-timeframe RSI transitions (operator rule 2026-10-12): once per state
-    # change per session, so the phone ping can never turn into a per-minute
-    # drumbeat the way an every-candle rule would.
-    SignalType.RSI_BULLISH,
-    SignalType.RSI_BEARISH,
+    # RSI transitions (operator rule 2026-10-12, reversed 2026-10-15): below 40 in an
+    # up-trend is the green side, an **entry**; above 60 in a down-trend is the red
+    # one. Both are raised once per state *change*, never per candle — the nightly
+    # two-timeframe pair by :meth:`WorkerRuntime._emit_rsi_transitions`, the
+    # intraday five-minute reading by the ``rsi`` detector. The old ``RSI_BULLISH`` /
+    # ``RSI_BEARISH`` rows stay in the database as history; nothing raises them any
+    # more, and a page that called the oversold side "bullish" is the thing this
+    # rename exists to stop.
+    SignalType.RSI_ENTRY,
+    SignalType.RSI_OVERBOUGHT,
     # Level breaks (operator feature 2026-10-14). This set says the *type* is
     # pushable; whether a given strategy pages the phone is decided per event from
     # ``ops_settings['alert_strategies']`` — see :meth:`AlertEngine.raise_breakout`.
@@ -74,6 +79,12 @@ COOLDOWN_APPLIED = {
     # muted by a VWAP loss raised in the same minute on the same stock.
     SignalType.BREAKOUT_UP,
     SignalType.BREAKDOWN,
+    # The ``rsi`` detector is the fourth strategy and has its own window (30 minutes
+    # by default: an RSI that hugs 40 in a slow drift is one piece of news). The
+    # nightly pair raises the same two types with ``cooldown_minutes=0``, which asks
+    # for no window at all — its once-per-session idempotency key is its dedupe.
+    SignalType.RSI_ENTRY,
+    SignalType.RSI_OVERBOUGHT,
 }
 
 
@@ -126,9 +137,17 @@ def _subject(signal: Signal) -> str:
     return f"instrument #{signal.instrument_id}"
 
 
+#: Titles the automatic casing cannot produce, because the acronym *is* the subject:
+#: "Rsi Entry" is what ``title()`` makes of a type an operator reads on a phone.
+_TYPE_LABELS = {
+    SignalType.RSI_ENTRY: "RSI entry",
+    SignalType.RSI_OVERBOUGHT: "RSI overbought",
+}
+
+
 def format_message(signal: Signal, *, deep_link: str | None = None) -> str:
     """Human-readable alert text shared by Telegram and the dashboard."""
-    label = signal.signal_type.value.replace("_", " ").title()
+    label = _TYPE_LABELS.get(signal.signal_type) or signal.signal_type.value.replace("_", " ").title()
     stamp = signal.event_timestamp.strftime("%Y-%m-%d %H:%M:%S %Z")
     lines = [f"{_emoji(signal.signal_type)} {label} — {_subject(signal)}"]
     if signal.company_name and signal.company_name != signal.symbol:
@@ -170,6 +189,12 @@ def _emoji(kind: SignalType) -> str:
         SignalType.DATA_FEED_INTERRUPTED: "⚠️",
         SignalType.DATA_FEED_RECOVERED: "✅",
         SignalType.DAILY_SCAN_COMPLETE: "📊",
+        # Green is the actionable side and red is the warning, on both horizons:
+        # the entry is what the operator acts on, the overbought reading is the one
+        # to step back from. 📈/📉 stay mapped for the retired pair so an old row
+        # re-rendered from the database does not turn into an information icon.
+        SignalType.RSI_ENTRY: "🟢",
+        SignalType.RSI_OVERBOUGHT: "🔴",
         SignalType.RSI_BULLISH: "📈",
         SignalType.RSI_BEARISH: "📉",
         SignalType.BREAKOUT_UP: "🔼",
@@ -246,9 +271,11 @@ class AlertEngine:
         """Persist one alert and queue its deliveries.
 
         ``cooldown_minutes`` overrides :attr:`ScannerParams.alert_cooldown_minutes`
-        for a strategy that carries its own window; ``telegram=False`` records the
-        alert — the board still shows it — without paging the phone. Both default to
-        the global behaviour, so every existing caller is unchanged.
+        for a strategy that carries its own window; ``0`` asks for no window at all,
+        which is what the nightly RSI pair passes because its idempotency key already
+        makes it once-per-session. ``telegram=False`` records the alert — the board
+        still shows it — without paging the phone. Both default to the global
+        behaviour, so every existing caller is unchanged.
         """
         signal = Signal(
             instrument_id=instrument_id,
@@ -379,14 +406,27 @@ class AlertEngine:
         strategy name inside ``reasons`` is what keeps each strategy's cooldown
         separate. Both are decided in the detector, not here; this method only
         carries them into the database unchanged.
+
+        The fourth strategy is the exception, and deliberately so. A day high or a
+        VWAP loss is a *move*, so its type names the direction. The RSI rule is not a
+        move, it is a *reading against a level*, and its useful direction is the one
+        the tape made through 40 or 60: oversold in an up-trend is the break *down*
+        through the level and the side worth acting on. Reusing ``BREAKDOWN`` for that
+        would put a green, actionable entry on the board under a word that reads like
+        a warning — which is the exact confusion the 2026-10-15 reversal was asked to
+        end — so it gets its own two types instead.
         """
         change = (
             None
             if not previous_close
             else (event.price / previous_close - 1.0) * 100.0
         )
+        if event.strategy == "rsi":
+            signal_type = SignalType.RSI_OVERBOUGHT if event.is_up else SignalType.RSI_ENTRY
+        else:
+            signal_type = SignalType.BREAKOUT_UP if event.is_up else SignalType.BREAKDOWN
         return await self.raise_alert(
-            signal_type=SignalType.BREAKOUT_UP if event.is_up else SignalType.BREAKDOWN,
+            signal_type=signal_type,
             instrument_id=event.instrument_id,
             session_id=session_id,
             event_timestamp=event.candle_start,

@@ -343,6 +343,7 @@ class ScannerPipeline:
             close=candle.close,
             volume=candle.volume,
             in_current_session=in_session,
+            candle_start=candle.candle_start,
         )
         if in_session:
             count = self._session_candle_count.get(candle.instrument_id, 0) + 1
@@ -374,10 +375,28 @@ class ScannerPipeline:
             session_high=self._session_high.get(candle.instrument_id),
             session_low=self._session_low.get(candle.instrument_id),
         )
+        # The detectors are folded in *before* the snapshot is written, not after it:
+        # the RSI rule's verdict belongs on this candle's row, and judging once and
+        # reading the same verdict back is what keeps the snapshot, the board and the
+        # Telegram line from telling three versions of one event. A feed we cannot
+        # trust does not enter the detectors at all — a flat minute would build a
+        # level and a streak out of nothing — so the row carries the last verdict the
+        # trustworthy tape produced, the same treatment its EMA and VWAP get.
+        events: list[BreakoutEvent] = []
+        if self.feed_status not in OUTAGE_STATUSES:
+            events = self.breakouts.on_candle(
+                candle,
+                symbol=instrument.symbol,
+                vwap=values.vwap,
+                relative_volume=values.relative_volume,
+                rsi_5m=values.rsi_5m,
+                trend=result.trend,
+            )
         snapshot = result.to_snapshot(
             trading_date=self.window.trading_date,
             config_version=self.params.config_version,
             is_simulated=self.is_simulated,
+            rsi_state=self.breakouts.rsi_state(candle.instrument_id),
         )
         snapshot_id = await self.store.upsert_indicator_snapshot(snapshot)
         self.counters.snapshots_written += 1
@@ -397,8 +416,8 @@ class ScannerPipeline:
         # Level breaks are judged for every instrument the feed reaches, not only
         # the ones that qualified: a day high on a stock the scanner never liked is
         # still a day high, and the operator asked for the whole F&O universe.
-        self.counters.breakouts_detected += await self._evaluate_breakouts(
-            candle, instrument=instrument, vwap=values.vwap, relative_volume=values.relative_volume
+        self.counters.breakouts_detected += await self._raise_breakouts(
+            events, instrument=instrument
         )
         outcome = await self.watchlist.on_candle(
             session_id=self.session.id,
@@ -415,26 +434,16 @@ class ScannerPipeline:
         if outcome.signaled:
             self.counters.signals_raised += 1
 
-    async def _evaluate_breakouts(
-        self,
-        candle: Candle,
-        *,
-        instrument: Instrument,
-        vwap: float | None,
-        relative_volume: float | None,
+    async def _raise_breakouts(
+        self, events: list[BreakoutEvent], *, instrument: Instrument
     ) -> int:
-        """Fold one completed candle into the level detectors; alert on what returns.
+        """Alert on what the detectors found; returns how many they found.
 
-        Returns the number of events found, before idempotency and cooldown. The
-        detector itself is pure and holds no database handle — this is the only
-        place its output meets the alert engine.
+        The detector itself is pure and holds no database handle — this is the only
+        place its output meets the alert engine. It is a separate method from the
+        judging call because the snapshot has to be written with the RSI verdict
+        first, and one call per candle is the whole reason the two can agree.
         """
-        events = self.breakouts.on_candle(
-            candle,
-            symbol=instrument.symbol,
-            vwap=vwap,
-            relative_volume=relative_volume,
-        )
         for event in events:
             await self._raise_breakout(event, instrument=instrument)
         return len(events)

@@ -1,27 +1,14 @@
 import Link from "next/link";
 import { Panel, ErrorNote, PageHeading } from "@/components/ui";
 import { SignalsTable } from "@/components/SignalsTable";
+import { SIGNAL_TYPES, parseSignalType } from "@/lib/filters";
 import { ok, panel } from "@/lib/panel";
 import { source } from "@/lib/source";
 import { dateParam } from "@/lib/rows";
-import type { SignalType } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-const TYPES: SignalType[] = [
-  "BULLISH_ENTRY",
-  "WATCHLIST_ADDED",
-  "WATCHLIST_WEAKENING",
-  "WATCHLIST_REMOVED",
-  "WATCHLIST_REQUALIFIED",
-  "DATA_FEED_INTERRUPTED",
-  "DATA_FEED_RECOVERED",
-  "DAILY_SCAN_COMPLETE",
-  "RSI_BULLISH",
-  "RSI_BEARISH",
-  "BREAKOUT_UP",
-  "BREAKDOWN",
-];
+const TYPES = SIGNAL_TYPES;
 
 const LIMITS = [25, 50, 100, 250];
 
@@ -39,8 +26,10 @@ export default async function SignalsPage({
 }) {
   const params = await searchParams;
   const date = dateParam(params.date);
-  const rawType = (params.type ?? "").toUpperCase();
-  const type = TYPES.includes(rawType as SignalType) ? rawType : "";
+  // An unknown type in the URL is not an error on this page: the feed falls back to
+  // showing everything, which is what a stale bookmark asks for. `/api/signals` answers
+  // 400 for the same input, because a program that misspelled a type wants to be told.
+  const type = parseSignalType(params.type) ?? "";
   const symbol = (params.symbol ?? "").trim().slice(0, 32);
   const limitChoice = LIMITS.includes(Number(params.limit)) ? Number(params.limit) : 100;
 

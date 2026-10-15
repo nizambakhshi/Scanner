@@ -38,7 +38,7 @@ from typing import Any
 from .alerts import AlertEngine
 from .analytics.breakouts import StrategiesConfig, parse_strategies, unknown_strategies_in
 from .analytics.indicators import IndicatorRegistry
-from .analytics.rsi import BEARISH, BULLISH
+from .analytics.rsi import ENTRY, OVERBOUGHT
 from .config import (
     ConfigError,
     ScannerParams,
@@ -101,8 +101,8 @@ ALERT_SETTINGS_POLL_SECONDS = 60.0
 
 
 def _rsi_message(state: RsiState) -> str:
-    """The one-line why for a two-timeframe RSI alert (bias is BULLISH or BEARISH)."""
-    condition = "above 60" if state.rsi_bias == BULLISH else "below 40"
+    """The one-line why for a two-timeframe RSI alert (bias is ENTRY or OVERBOUGHT)."""
+    condition = "below 40" if state.rsi_bias == ENTRY else "above 60"
     daily = f"{state.daily_rsi:.1f}" if state.daily_rsi is not None else "n/a"
     weekly = f"{state.weekly_rsi:.1f}" if state.weekly_rsi is not None else "n/a"
     return f"Daily RSI {daily} · weekly RSI {weekly} — both {condition}"
@@ -675,17 +675,20 @@ class WorkerRuntime:
     ) -> None:
         """Two-timeframe RSI alerts, one per bias *change*, at session start.
 
-        The operator rule (2026-10-12): daily and weekly RSI both above 60 →
-        BULLISH, both below 40 → BEARISH, the 40–60 band → NEUTRAL. The pair is
-        recomputed nightly by ``scanner-sync-daily`` into ``stock_details``;
-        ``last_alert_bias`` is the bias this worker last acted on. Equal → a
-        standing state, nothing to say. A NULL ``last_alert_bias`` is the first
-        sighting since the feature shipped: the bias is adopted silently, so
-        rollout day does not page the operator once per instrument. Only a
-        transition *into* BULLISH or BEARISH alerts; a transition into NEUTRAL
-        is written quietly as the new baseline so rotating back out of the band
-        later reads as a real change. The (type, instrument, session)
-        idempotency key makes a mid-session restart unable to alert twice.
+        The operator rule, as of 2026-10-15: daily and weekly RSI both **below 40**
+        → ENTRY (the green, actionable side), both **above 60** → OVERBOUGHT (red),
+        the 40–60 band → NEUTRAL. The pair is recomputed nightly by
+        ``scanner-sync-daily`` into ``stock_details``; ``last_alert_bias`` is the bias
+        this worker last acted on. Equal → a standing state, nothing to say. A NULL
+        ``last_alert_bias`` is the first sighting since the feature shipped: the bias
+        is adopted silently, so rollout day does not page the operator once per
+        instrument. Only a transition *into* ENTRY or OVERBOUGHT alerts; a transition
+        into NEUTRAL is written quietly as the new baseline so rotating back out of
+        the band later reads as a real change. The (type, instrument, session)
+        idempotency key makes a mid-session restart unable to alert twice, and
+        ``cooldown_minutes=0`` keeps this horizon out of the intraday rule's window:
+        the nightly pair and the five-minute detector raise the same two types from
+        different measurements, and neither one gets to mute the other.
         """
         engine = self._alerts
         if engine is None:
@@ -695,7 +698,7 @@ class WorkerRuntime:
         except Exception as exc:  # noqa: BLE001 — a details hiccup must not stop the day
             log.warning("rsi_states_read_failed", error=scrub(f"{type(exc).__name__}: {exc}"))
             return
-        counts = {"bullish": 0, "bearish": 0, "neutral": 0, "baselined": 0}
+        counts = {"entry": 0, "overbought": 0, "neutral": 0, "baselined": 0}
         for state in states:
             instrument = instruments.get(state.instrument_id)
             if instrument is None or state.rsi_bias is None:
@@ -706,10 +709,10 @@ class WorkerRuntime:
             try:
                 if state.last_alert_bias is None:
                     counts["baselined"] += 1
-                elif state.rsi_bias in (BULLISH, BEARISH):
-                    bullish = state.rsi_bias == BULLISH
+                elif state.rsi_bias in (ENTRY, OVERBOUGHT):
+                    entry = state.rsi_bias == ENTRY
                     await engine.raise_alert(
-                        signal_type=SignalType.RSI_BULLISH if bullish else SignalType.RSI_BEARISH,
+                        signal_type=SignalType.RSI_ENTRY if entry else SignalType.RSI_OVERBOUGHT,
                         instrument_id=state.instrument_id,
                         session_id=session.id,
                         event_timestamp=now_ist(),
@@ -718,13 +721,14 @@ class WorkerRuntime:
                         exchange=instrument.exchange,
                         previous_close=instrument.previous_close,
                         reasons=(
-                            ("daily rsi above 60", "weekly rsi above 60")
-                            if bullish
-                            else ("daily rsi below 40", "weekly rsi below 40")
+                            ("daily rsi below 40", "weekly rsi below 40")
+                            if entry
+                            else ("daily rsi above 60", "weekly rsi above 60")
                         ),
                         message=_rsi_message(state),
+                        cooldown_minutes=0,
                     )
-                    counts["bullish" if bullish else "bearish"] += 1
+                    counts["entry" if entry else "overbought"] += 1
                 else:
                     counts["neutral"] += 1
                 await self.store.set_last_alert_bias(state.instrument_id, state.rsi_bias)

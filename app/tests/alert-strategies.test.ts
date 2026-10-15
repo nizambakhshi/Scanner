@@ -7,6 +7,7 @@ import {
   defaultStrategies,
   parseStrategies,
   parseStrategyEdits,
+  SIGNAL_TYPE_FOR_DIRECTION,
   strategiesAdvisories,
   strategiesDiff,
   strategyProblems,
@@ -24,10 +25,18 @@ import {
  */
 
 const WORKER_DEFAULTS = {
-  session_break: { enabled: true, threshold_pct: 0.1, confirm_candles: 1, min_volume_ratio: 1.0, cooldown_minutes: 15, telegram: true },
-  orb: { enabled: true, threshold_pct: 0.0, confirm_candles: 1, min_volume_ratio: 1.5, cooldown_minutes: 0, telegram: true },
-  vwap: { enabled: true, threshold_pct: 0.1, confirm_candles: 2, min_volume_ratio: 1.0, cooldown_minutes: 10, telegram: true },
+  session_break: { enabled: true, threshold_pct: 0.1, confirm_candles: 1, min_volume_ratio: 1.0, cooldown_minutes: 15, telegram: true, oversold: 40, overbought: 60 },
+  orb: { enabled: true, threshold_pct: 0.0, confirm_candles: 1, min_volume_ratio: 1.5, cooldown_minutes: 0, telegram: true, oversold: 40, overbought: 60 },
+  vwap: { enabled: true, threshold_pct: 0.1, confirm_candles: 2, min_volume_ratio: 1.0, cooldown_minutes: 10, telegram: true, oversold: 40, overbought: 60 },
+  // The fourth card, and the reason the shape carries two levels: the worker's
+  // `StrategyParams` has one field list for every detector, so a level rule still
+  // stores 40/60 even though it never reads them.
+  rsi: { enabled: true, threshold_pct: 0.0, confirm_candles: 2, min_volume_ratio: 0.0, cooldown_minutes: 30, telegram: true, oversold: 40, overbought: 60 },
 };
+
+test("the page offers exactly the detectors the worker runs", () => {
+  assert.deepEqual([...STRATEGIES].sort(), Object.keys(WORKER_DEFAULTS).sort());
+});
 
 test("the defaults the page shows are the defaults the worker ships", () => {
   assert.deepEqual(DEFAULT_PARAMS, WORKER_DEFAULTS);
@@ -51,9 +60,13 @@ test("an absent document parses to the defaults, in either stored shape", () => 
   }
 });
 
-test("the document 0010 seeds is exactly the defaults", () => {
-  // The migration seeds the shipped values verbatim; if either changes, this fails
-  // before a deployed page can display a configuration the worker is not running.
+test("the document 0010 seeded still parses to the shipped defaults", () => {
+  // 0011 deliberately leaves `ops_settings['alert_strategies']` alone, so production
+  // can hold the row 0010 wrote: three strategies, six fields each. The parser fills
+  // what a row omits from the same defaults the worker ships, which is the only
+  // reason a database from before the fourth detector exists still describes the
+  // rules actually running. If this ever stops being true, the deployed page would
+  // be displaying a configuration the worker is not obeying.
   const seeded = {
     version: 1,
     strategies: {
@@ -67,6 +80,7 @@ test("the document 0010 seeds is exactly the defaults", () => {
   if (parsed.ok) {
     assert.deepEqual(parsed.doc, defaultStrategies());
     assert.deepEqual(parsed.warnings, []);
+    assert.equal(parsed.doc.strategies.rsi.oversold, 40, "the missing strategy arrives with the operator's two levels");
   }
 });
 
@@ -97,6 +111,74 @@ test("every range the worker refuses, the page refuses too", () => {
     strategyProblems("vwap", { ...WORKER_DEFAULTS.vwap, threshold_pct: 5, confirm_candles: 5, min_volume_ratio: 10, cooldown_minutes: 240 }),
     [],
   );
+  // The pair's own boundaries: 1 and 99 are legal, and so is any ordered pair the
+  // operator chooses — the defaults are not the only working setting.
+  assert.deepEqual(strategyProblems("rsi", { ...WORKER_DEFAULTS.rsi, oversold: 1, overbought: 99 }), []);
+});
+
+test("the two RSI levels are checked as an ordered pair, in the worker's words", () => {
+  // `0 < oversold < overbought < 100` — one sentence in `StrategyParams.problems()`,
+  // and the page must refuse exactly that sentence's cases. The reason for mirroring
+  // the text rather than paraphrasing it: if the page says "must be below 60" while
+  // the worker says "0 < oversold < overbought < 100", an operator who reads the
+  // worker's log after a refused save has no idea which of the two lied.
+  const cases: [number, number][] = [
+    [40, 40], // inverted-by-tie: a band with no inside
+    [70, 60], // crossed
+    [0, 60], // a level at zero is a level that can never be under
+    [40, 100], // RSI is 0–100; 100 is unreachable, so the rule would never fire
+    [-5, 60],
+    [40, 101],
+  ];
+  for (const [oversold, overbought] of cases) {
+    const params = { ...WORKER_DEFAULTS.rsi, oversold, overbought };
+    const problems = strategyProblems("rsi", params);
+    assert.equal(problems.length, 1, `oversold=${oversold} overbought=${overbought} must be rejected`);
+    assert.match(problems[0] ?? "", /oversold\/overbought must be 0 < oversold < overbought < 100/);
+    assert.equal(parseStrategies({ strategies: { rsi: params } }).ok, false);
+  }
+  // A level rule that ignores the two numbers still has to store a legal pair,
+  // because the shape is shared and the worker validates the whole dataclass.
+  assert.equal(parseStrategies({ strategies: { vwap: { oversold: 80, overbought: 20 } } }).ok, false);
+  // The form reaches the same refusal through the editor path, so a card can never
+  // show a red error the save would have accepted.
+  const edit = parseStrategyEdits({ "rsi.oversold": "55", "rsi.overbought": "50" });
+  assert.equal(edit.ok, false);
+  if (!edit.ok) assert.match(edit.error, /RSI entry \/ overbought/);
+});
+
+test("the RSI card's knobs round-trip without disturbing the other three", () => {
+  const parsed = parseStrategies({ strategies: { rsi: { oversold: 35, overbought: 55, confirm_candles: 3, cooldown_minutes: 60 } } });
+  assert.ok(parsed.ok);
+  if (!parsed.ok) return;
+  assert.equal(parsed.doc.strategies.rsi.oversold, 35);
+  assert.equal(parsed.doc.strategies.rsi.overbought, 55);
+  assert.equal(parsed.doc.strategies.rsi.confirm_candles, 3);
+  assert.equal(parsed.doc.strategies.rsi.cooldown_minutes, 60);
+  // Not shown on the card, still stored at the shipped value: the detector does not
+  // read a percentage threshold, but the shape carries one for the other three.
+  assert.equal(parsed.doc.strategies.rsi.threshold_pct, 0);
+  assert.equal(parsed.doc.strategies.orb.min_volume_ratio, 1.5);
+
+  const edited = parseStrategyEdits({ "rsi.oversold": "30" }, parsed.doc);
+  assert.ok(edited.ok);
+  if (!edited.ok) return;
+  assert.equal(edited.doc.strategies.rsi.oversold, 30);
+  assert.equal(edited.doc.strategies.rsi.overbought, 55, "the pair's other half is not reset by editing one side");
+  assert.equal(edited.doc.strategies.rsi.cooldown_minutes, 60);
+  assert.deepEqual(strategiesDiff(parsed.doc, edited.doc), { "rsi.oversold": { from: 35, to: 30 } });
+});
+
+test("the entry side is the one that pages on a falling RSI", () => {
+  // The colour/direction inversion the whole feature rests on: green here means a
+  // dip under `oversold`, which the worker reports as direction DOWN / RSI_ENTRY,
+  // while the red print is direction UP / RSI_OVERBOUGHT. The /alerts today-counts
+  // and each rule card read this mapping instead of guessing from colour, so a
+  // rewording cannot silently start counting the wrong half of the band.
+  assert.deepEqual(SIGNAL_TYPE_FOR_DIRECTION.rsi, { UP: "RSI_OVERBOUGHT", DOWN: "RSI_ENTRY" });
+  for (const key of ["session_break", "orb", "vwap"] as const) {
+    assert.deepEqual(SIGNAL_TYPE_FOR_DIRECTION[key], { UP: "BREAKOUT_UP", DOWN: "BREAKDOWN" });
+  }
 });
 
 test("a value that is not a number is reported by strategy and field", () => {

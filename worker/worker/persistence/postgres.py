@@ -1110,6 +1110,7 @@ class PostgresStore(ScannerStore):
                 vwap, ema9, ema20, average_volume20, relative_volume,
                 intraday_change_pct, distance_from_vwap_pct, ema_spread_pct,
                 session_high, session_low, distance_from_high_pct,
+                rsi_5m, rsi_state,
                 bullish_qualified, reasons, failed_reasons, data_quality_status,
                 warming_up, score, "rank", config_version, is_simulated
             ) VALUES (
@@ -1117,7 +1118,8 @@ class PostgresStore(ScannerStore):
                 %(previous_close)s, %(vwap)s, %(ema9)s, %(ema20)s, %(average_volume20)s,
                 %(relative_volume)s, %(intraday_change_pct)s, %(distance_from_vwap_pct)s,
                 %(ema_spread_pct)s, %(session_high)s, %(session_low)s,
-                %(distance_from_high_pct)s, %(bullish_qualified)s, %(reasons)s,
+                %(distance_from_high_pct)s, %(rsi_5m)s, %(rsi_state)s,
+                %(bullish_qualified)s, %(reasons)s,
                 %(failed_reasons)s, %(data_quality_status)s, %(warming_up)s,
                 %(score)s, %(rank)s, %(config_version)s, %(is_simulated)s
             )
@@ -1136,6 +1138,8 @@ class PostgresStore(ScannerStore):
                 session_high = EXCLUDED.session_high,
                 session_low = EXCLUDED.session_low,
                 distance_from_high_pct = EXCLUDED.distance_from_high_pct,
+                rsi_5m = EXCLUDED.rsi_5m,
+                rsi_state = EXCLUDED.rsi_state,
                 bullish_qualified = EXCLUDED.bullish_qualified,
                 reasons = EXCLUDED.reasons,
                 failed_reasons = EXCLUDED.failed_reasons,
@@ -1164,6 +1168,8 @@ class PostgresStore(ScannerStore):
             "session_high": _r(snapshot.session_high),
             "session_low": _r(snapshot.session_low),
             "distance_from_high_pct": _r(snapshot.distance_from_high_pct),
+            "rsi_5m": _r(snapshot.rsi_5m, 4),
+            "rsi_state": snapshot.rsi_state,
             "bullish_qualified": snapshot.bullish_qualified,
             "reasons": list(snapshot.reasons),
             "failed_reasons": list(snapshot.failed_reasons),

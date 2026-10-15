@@ -21,7 +21,7 @@ clock.
 from __future__ import annotations
 
 import os
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -227,6 +227,33 @@ async def test_indicator_snapshot_upsert_is_idempotent(store: Any, instrument_id
     assert other != first_id
 
 
+async def test_the_intraday_rsi_reading_round_trips_on_its_own_candle(
+    store: Any, instrument_id: int
+) -> None:
+    """``rsi_5m`` / ``rsi_state`` are the two newest columns on this table, and the
+    insert lists thirty placeholders by hand. Reading the stored row back is the only
+    way to prove each value landed in its own column instead of a neighbour's — a
+    swapped pair would show the dashboard an RSI where it expects a VWAP and nothing
+    else would ever look wrong again."""
+    await store.upsert_indicator_snapshot(
+        replace(make_snapshot(instrument_id, 1), rsi_5m=37.25, rsi_state="ENTRY")
+    )
+    row = await read_snapshot_row(store, instrument_id, 1)
+    assert row["rsi_5m"] == pytest.approx(37.25)
+    assert row["rsi_state"] == "ENTRY"
+    # The columns it sits between keep their own values.
+    assert row["distance_from_high_pct"] == pytest.approx(0.50)
+    assert row["bullish_qualified"] is True
+    assert row["vwap"] == pytest.approx(100.0)
+
+    # A bucket the detector cannot judge yet stores NULL, not a word invented for it:
+    # the dashboard's em dash and the worker's "not evaluable" are the same absence.
+    await store.upsert_indicator_snapshot(make_snapshot(instrument_id, 2))
+    blank = await read_snapshot_row(store, instrument_id, 2)
+    assert blank["rsi_5m"] is None
+    assert blank["rsi_state"] is None
+
+
 # ── signals + notifications ───────────────────────────────────────────────────
 
 
@@ -415,6 +442,24 @@ def _plain(value: Any) -> Any:
     return float(value) if isinstance(value, Decimal) else value
 
 
+async def read_snapshot_row(store: Any, instrument_id: int, offset: int) -> dict[str, Any]:
+    """The raw ``indicator_snapshots`` row for one (instrument, minute).
+
+    Same reason as :func:`read_stock_details`: the store surface exposes no snapshot
+    read at all (the worker never queries its own history), so a test that cares
+    about *which column a value went into* has to reach past the API. The memory
+    store holds the dataclass it was given, so it is flattened to the same dict shape
+    and both stores answer with floats rather than ``Decimal``.
+    """
+    if isinstance(store, InMemoryStore):
+        return {key: _plain(value) for key, value in asdict(store.snapshots[(instrument_id, minute(offset))]).items()}
+    sql = "SELECT * FROM indicator_snapshots WHERE instrument_id = %s AND candle_start_at = %s"
+    async with store._pool.connection() as conn, conn.transaction():
+        row = await (await conn.execute(sql, (instrument_id, minute(offset)))).fetchone()
+    assert row is not None, "the snapshot was written but cannot be read back"
+    return {key: _plain(value) for key, value in dict(row).items()}
+
+
 async def test_daily_candle_upsert_is_idempotent_per_date(store: Any, instrument_id: int) -> None:
     first = make_daily_candle(instrument_id, date(2026, 10, 8), close=100.0)
     second = make_daily_candle(instrument_id, date(2026, 10, 9), close=101.0)
@@ -447,13 +492,17 @@ async def test_weekly_candle_upsert_is_idempotent_per_week(store: Any, instrumen
 
 
 async def test_stock_technicals_and_alert_bias_round_trip(store: Any, instrument_id: int) -> None:
+    # The bias vocabulary is the operator's 2026-10-15 rename: both timeframes above
+    # 60 is OVERBOUGHT (the expensive side, red), not the "BULLISH" a momentum
+    # reading called it. The CHECK on both columns rejects the old words, so this
+    # test is also the proof that the store writes the shape the database accepts.
     await store.update_stock_technicals(
         [
             StockTechnicals(
                 instrument_id=instrument_id,
                 daily_rsi=63.2,
                 weekly_rsi=61.8,
-                rsi_bias="BULLISH",
+                rsi_bias="OVERBOUGHT",
                 rsi_as_of=date(2026, 10, 9),
                 data_start=date(2002, 1, 1),
                 high_52w=1700.0,
@@ -468,12 +517,12 @@ async def test_stock_technicals_and_alert_bias_round_trip(store: Any, instrument
     assert states[0].instrument_id == instrument_id
     assert states[0].daily_rsi == pytest.approx(63.2)
     assert states[0].weekly_rsi == pytest.approx(61.8)
-    assert states[0].rsi_bias == "BULLISH"
+    assert states[0].rsi_bias == "OVERBOUGHT"
     assert states[0].last_alert_bias is None, "the worker baselines this, sync never does"
 
-    await store.set_last_alert_bias(instrument_id, "BULLISH")
+    await store.set_last_alert_bias(instrument_id, "OVERBOUGHT")
     states = await store.list_rsi_states()
-    assert states[0].last_alert_bias == "BULLISH"
+    assert states[0].last_alert_bias == "OVERBOUGHT"
 
     # A nightly refresh rewrites the technicals columns; the alert bookkeeping
     # column is the worker's and must survive it, and a NULL data_start in the
@@ -484,7 +533,7 @@ async def test_stock_technicals_and_alert_bias_round_trip(store: Any, instrument
                 instrument_id=instrument_id,
                 daily_rsi=64.0,
                 weekly_rsi=62.5,
-                rsi_bias="BULLISH",
+                rsi_bias="OVERBOUGHT",
                 rsi_as_of=date(2026, 10, 10),
                 data_start=None,
                 high_52w=1710.0,
@@ -496,12 +545,12 @@ async def test_stock_technicals_and_alert_bias_round_trip(store: Any, instrument
     )
     states = await store.list_rsi_states()
     assert states[0].daily_rsi == pytest.approx(64.0)
-    assert states[0].last_alert_bias == "BULLISH", "sync must not clobber the worker's column"
+    assert states[0].last_alert_bias == "OVERBOUGHT", "sync must not clobber the worker's column"
     assert (await read_stock_details(store, instrument_id))["data_start"] == date(2002, 1, 1)
 
     # Anti-drift parity: setting a bias for a row that does not exist is a
     # silent no-op (the SQL UPDATE matches zero rows), never an error.
-    await store.set_last_alert_bias(instrument_id + 4242, "BULLISH")
+    await store.set_last_alert_bias(instrument_id + 4242, "OVERBOUGHT")
 
 
 async def test_stock_profiles_coalesce_listing_date_across_sources(

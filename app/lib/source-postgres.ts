@@ -70,8 +70,10 @@ const WORKER_SQL = `
   ORDER BY updated_at DESC NULLS LAST`;
 
 /** Qualifiers first, then by score — the same order the watchlist ranks in (§11.1).
- *  The LEFT JOIN carries the two-timeframe RSI context; a stock whose instrument
- *  has no `stock_details` row yet renders the RSI cells as "—", never as 0. */
+ *  The five-minute RSI rides in on the view's own snapshot join, so the number the
+ *  board colours is the number the detector alerted on. The LEFT JOIN carries the
+ *  nightly two-timeframe context; a stock whose instrument has no `stock_details`
+ *  row yet renders those cells as "—", never as 0. */
 const WATCHLIST_SQL = `
   SELECT w.watchlist_id::int AS watchlist_id, w.trading_session_id::int AS trading_session_id,
          w.trading_date::text AS trading_date, w.instrument_id::int AS instrument_id,
@@ -92,6 +94,7 @@ const WATCHLIST_SQL = `
          w.is_active, w.is_simulated, w.bullish_qualified, w.reasons, w.failed_reasons,
          w.data_quality, w.warming_up, w.latest_candle_at,
          w.indicator_snapshot_id::int AS indicator_snapshot_id,
+         w.rsi_5m::float8 AS rsi_5m, w.rsi_state,
          sd.daily_rsi::float8  AS daily_rsi,
          sd.weekly_rsi::float8 AS weekly_rsi,
          sd.rsi_bias
@@ -426,6 +429,7 @@ const SNAPSHOTS_SQL = `
          ema_spread_pct::float8 AS ema_spread_pct,
          session_high::float8 AS session_high, session_low::float8 AS session_low,
          distance_from_high_pct::float8 AS distance_from_high_pct,
+         rsi_5m::float8 AS rsi_5m, rsi_state,
          bullish_qualified, reasons, failed_reasons, data_quality_status, warming_up,
          score::float8 AS score, rank::int AS rank, config_version::int AS config_version,
          is_simulated

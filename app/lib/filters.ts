@@ -2,18 +2,54 @@
  * The filter vocabulary for the two directory boards.
  *
  * Both /stocks and /strategy show a row of tally chips above their table, and
- * every chip is also the filter for its own count — "Bullish 3" both reports and
+ * every chip is also the filter for its own count — "Entry 12" both reports and
  * selects. The selection lives in the URL (`?bias=…`, `?status=…`) rather than
  * client state: the pages are server-rendered, the cut stays shareable, and the
  * back button works. An unknown value parses to ALL — a stale bookmark must show
  * the whole board, never an unexplained empty table.
  */
 
-import type { OrbView, StockOverviewRow } from "./types";
+import type { OrbView, SignalType, StockOverviewRow } from "./types";
 
-export type StockBiasFilter = "ALL" | "CLASSIFIED" | "BULLISH" | "BEARISH" | "NEUTRAL";
+/**
+ * Every signal type a row can carry, in the order the feed lists them.
+ *
+ * One list rather than two, because the page's chips and the API's allowlist answer
+ * the same question — "is this a type a signal row can have?" — and when they drift,
+ * a filter a person can select becomes a query the endpoint refuses. The retired
+ * `RSI_BULLISH` / `RSI_BEARISH` pair stays: migration 0011 retired the vocabulary but
+ * kept the rows written under it readable, and a feed that cannot select its own
+ * history is a feed with unreachable rows.
+ */
+export const SIGNAL_TYPES: readonly SignalType[] = [
+  "BULLISH_ENTRY",
+  "WATCHLIST_ADDED",
+  "WATCHLIST_WEAKENING",
+  "WATCHLIST_REMOVED",
+  "WATCHLIST_REQUALIFIED",
+  "DATA_FEED_INTERRUPTED",
+  "DATA_FEED_RECOVERED",
+  "DAILY_SCAN_COMPLETE",
+  "RSI_ENTRY",
+  "RSI_OVERBOUGHT",
+  "RSI_BULLISH",
+  "RSI_BEARISH",
+  "BREAKOUT_UP",
+  "BREAKDOWN",
+];
 
-const STOCK_BIAS_FILTERS: readonly string[] = ["CLASSIFIED", "BULLISH", "BEARISH", "NEUTRAL"];
+const SIGNAL_TYPE_SET = new Set<string>(SIGNAL_TYPES);
+
+/** A query-string type, upper-cased for the person who typed it lowercase, or `null`
+ *  when no row could ever carry it. */
+export function parseSignalType(raw: string | string[] | undefined | null): SignalType | null {
+  const value = (Array.isArray(raw) ? (raw[0] ?? "") : (raw ?? "")).toUpperCase();
+  return SIGNAL_TYPE_SET.has(value) ? (value as SignalType) : null;
+}
+
+export type StockBiasFilter = "ALL" | "CLASSIFIED" | "ENTRY" | "OVERBOUGHT" | "NEUTRAL";
+
+const STOCK_BIAS_FILTERS: readonly string[] = ["CLASSIFIED", "ENTRY", "OVERBOUGHT", "NEUTRAL"];
 
 export function parseStockBiasFilter(raw: string | string[] | undefined): StockBiasFilter {
   const value = (Array.isArray(raw) ? raw[0] : raw)?.toUpperCase() ?? "";
@@ -22,15 +58,19 @@ export function parseStockBiasFilter(raw: string | string[] | undefined): StockB
 
 /** `CLASSIFIED` is the "the daily/weekly sync has covered this symbol" cut — a
  *  null bias is "not classified yet", and it must not be lumped into NEUTRAL,
- *  because neutral is a measurement and absence is not. */
+ *  because neutral is a measurement and absence is not.
+ *
+ *  A bookmark from before 2026-10-15 says `?bias=BULLISH`; that is not one of the
+ *  four values this build filters on, so it falls through to the whole universe
+ *  rather than quietly selecting nothing. */
 export function filterStocksByBias(rows: StockOverviewRow[], filter: StockBiasFilter): StockOverviewRow[] {
   switch (filter) {
     case "CLASSIFIED":
       return rows.filter((row) => row.rsi_bias !== null);
-    case "BULLISH":
-      return rows.filter((row) => row.rsi_bias === "BULLISH");
-    case "BEARISH":
-      return rows.filter((row) => row.rsi_bias === "BEARISH");
+    case "ENTRY":
+      return rows.filter((row) => row.rsi_bias === "ENTRY");
+    case "OVERBOUGHT":
+      return rows.filter((row) => row.rsi_bias === "OVERBOUGHT");
     case "NEUTRAL":
       return rows.filter((row) => row.rsi_bias === "NEUTRAL");
     default:

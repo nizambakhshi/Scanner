@@ -32,6 +32,14 @@ from worker.analytics.breakouts import (
     strategy_reason,
     unknown_strategies_in,
 )
+from worker.analytics.rsi import (
+    ENTRY,
+    NEUTRAL,
+    OVERBOUGHT,
+    TREND_DOWN,
+    TREND_MIXED,
+    TREND_UP,
+)
 from worker.timeutils import SessionWindow, ist_zoneinfo
 
 
@@ -70,7 +78,7 @@ def bar(
 
 
 def only(name: str, **tweaks: Any) -> StrategiesConfig:
-    """One strategy armed (its defaults plus ``tweaks``), the other two off.
+    """One strategy armed (its defaults plus ``tweaks``), the other three off.
 
     So each test sees only its own rules firing and a stray alert from another
     strategy cannot be mistaken for the behaviour under test.
@@ -176,15 +184,25 @@ def test_invalid_values_raise_naming_the_strategy_and_field():
         parse_strategies(["orb"])
     with pytest.raises(ValueError, match="orb: expected an object"):
         parse_strategies({"strategies": {"orb": True}})
+    # The RSI rule's own two lines: the entry side has to sit under the expensive
+    # side, or every reading is simultaneously an entry and a warning.
+    with pytest.raises(ValueError, match="rsi: oversold/overbought"):
+        parse_strategies({"strategies": {"rsi": {"oversold": 70.0}}})
+    with pytest.raises(ValueError, match="rsi: oversold/overbought"):
+        parse_strategies({"strategies": {"rsi": {"oversold": 0.0, "overbought": 60.0}}})
+    assert parse_strategies({"strategies": {"rsi": {"oversold": 45}}}).rsi.oversold == 45.0
 
 
 def test_unknown_strategy_is_ignored_not_fatal():
     # A newer dashboard must never take the tape down by offering a strategy this
     # worker build cannot run; it is reported separately so the log can say so.
-    doc = {"strategies": {"orb": {"enabled": True}, "rsi_cross": {"enabled": True}}}
+    doc = {"strategies": {"orb": {"enabled": True}, "pivot_break": {"enabled": True}}}
     assert parse_strategies(doc).orb.enabled is True
-    assert unknown_strategies_in(doc) == ["rsi_cross"]
+    assert unknown_strategies_in(doc) == ["pivot_break"]
     assert unknown_strategies_in(None) == []
+    # …and the fourth detector this build *does* know is not among the ignored ones.
+    assert "rsi" in STRATEGIES
+    assert unknown_strategies_in({"rsi": {"enabled": True}}) == []
 
 
 def test_document_round_trips_through_the_stored_shape():
@@ -578,6 +596,212 @@ def test_vwap_needs_a_vwap():
     assert t.on_candle(bar(0, 100.0), symbol="X", vwap=None, relative_volume=2.0) == []
 
 
+# ── intraday RSI ────────────────────────────────────────────────────────────
+
+# The rule the operator wrote on 2026-10-15: "RSI Below 40 green for entry / rsi
+# above 60 is red", qualified by "not daily rsi, but rsi at the time of bullish
+# trend or bearish trend". Below 40 is only an *entry* while the tape is up, and
+# above 60 is only a *warning* while it is down.
+#
+# Readings are judged only on the candle that closes a five-minute bucket, so the
+# offsets below are 4, 9, 14, 19 … (09:19 ends the 09:15–09:20 bucket) and the ones
+# in between exist in these tests to prove they are not read.
+
+
+def rsi_t(**tweaks: Any) -> BreakoutTracker:
+    """The shipped RSI detector: two buckets, no volume gate, 30-minute cooldown."""
+    tweaks.setdefault("min_volume_ratio", 0.0)
+    return armed("rsi", **tweaks)
+
+
+def rsi_at(
+    t: BreakoutTracker,
+    offset: int,
+    reading: float | None,
+    trend: str | None,
+    **kwargs: Any,
+) -> list[BreakoutEvent]:
+    """One five-minute close: ``reading`` from the indicator engine, ``trend`` from the scanner."""
+    return t.on_candle(
+        bar(offset, 100.0), symbol="TCS", rsi_5m=reading, trend=trend, **kwargs
+    )
+
+
+def test_rsi_judges_only_the_candle_that_closes_a_bucket():
+    t = rsi_t(confirm_candles=1)
+    assert rsi_at(t, 3, 30.0, TREND_UP) == []  # 09:18 is inside the first bucket
+    assert t.rsi_state(1) is None  # … and was never read
+    rsi_at(t, 4, 30.0, TREND_UP)  # 09:19 closes it
+    assert t.rsi_state(1) == ENTRY
+    assert rsi_at(t, 8, 75.0, TREND_DOWN) == []  # 09:23 is inside the next one
+    assert t.rsi_state(1) == ENTRY  # so an expensive print there changes nothing
+    assert [e.strategy for e in rsi_at(t, 9, 75.0, TREND_DOWN)] == ["rsi"]  # 09:24 does
+    assert t.rsi_state(1) == OVERBOUGHT
+
+
+def test_the_first_rsi_verdict_is_a_baseline_not_news():
+    """A stock whose opening buckets print oversold has not *done* anything yet."""
+    t = rsi_t(confirm_candles=1)
+    for offset in (4, 9, 14):
+        assert rsi_at(t, offset, 35.0, TREND_UP) == []
+    assert t.rsi_state(1) == ENTRY
+    assert t.events_raised == 0
+
+
+def test_an_rsi_transition_needs_two_consecutive_buckets():
+    t = rsi_t()  # confirm_candles = 2, the shipped default
+    rsi_at(t, 4, 55.0, TREND_UP)  # inside the band: NEUTRAL baseline
+    assert t.rsi_state(1) == NEUTRAL
+    assert rsi_at(t, 9, 38.0, TREND_UP) == []  # first oversold bucket: 1 of 2
+    assert t.rsi_state(1) == NEUTRAL  # not adopted while it is only claimed
+    events = rsi_at(t, 14, 37.0, TREND_UP)  # the second one confirms
+    assert len(events) == 1
+    assert t.rsi_state(1) == ENTRY
+    assert events[0].cooldown_minutes == 30  # a drift that hugs 40 is one piece of news
+
+
+def test_leaving_a_named_state_for_the_band_is_silent():
+    """Going back into the band is the dip being over, not a second event."""
+    t = rsi_t(confirm_candles=1)
+    rsi_at(t, 4, 55.0, TREND_UP)  # NEUTRAL baseline
+    assert len(rsi_at(t, 9, 30.0, TREND_UP)) == 1  # ENTRY
+    assert t.rsi_state(1) == ENTRY
+    assert rsi_at(t, 14, 55.0, TREND_UP) == []  # back to the band: no page
+    assert t.rsi_state(1) == NEUTRAL
+
+
+def test_an_rsi_streak_abandoned_by_the_other_side_restarts_at_one():
+    t = rsi_t()  # two buckets
+    rsi_at(t, 4, 55.0, TREND_UP)  # NEUTRAL baseline
+    rsi_at(t, 9, 30.0, TREND_UP)  # ENTRY 1 of 2
+    assert rsi_at(t, 14, 75.0, TREND_DOWN) == []  # OVERBOUGHT starts its own count
+    assert rsi_at(t, 19, 30.0, TREND_UP) == []  # ENTRY again: one, not three
+    assert len(rsi_at(t, 24, 31.0, TREND_UP)) == 1  # … and now two
+    assert t.rsi_state(1) == ENTRY
+
+
+def test_the_rsi_volume_gate_drops_a_confirmed_reading_and_restarts_the_count():
+    t = rsi_t(min_volume_ratio=1.5)
+    rsi_at(t, 4, 55.0, TREND_UP, relative_volume=1.0)  # baseline; no gate consulted
+    assert rsi_at(t, 9, 30.0, TREND_UP, relative_volume=1.0) == []  # 1 of 2
+    assert rsi_at(t, 14, 30.0, TREND_UP, relative_volume=1.0) == []  # confirmed, thin
+    assert t.rsi_state(1) == NEUTRAL
+    # "Consecutive buckets" cannot survive one the gate rejected, so the next
+    # confirmation starts from one rather than continuing a run of three.
+    assert rsi_at(t, 19, 29.0, TREND_UP, relative_volume=2.0) == []
+    assert len(rsi_at(t, 24, 28.0, TREND_UP, relative_volume=2.0)) == 1
+
+
+def test_an_extreme_the_trend_does_not_confirm_is_neutral():
+    """Both halves of the rule are directional: a low RSI in a chop is not an entry."""
+    t = rsi_t(confirm_candles=1)
+    rsi_at(t, 4, 55.0, TREND_UP)  # NEUTRAL baseline
+    assert rsi_at(t, 9, 30.0, TREND_MIXED) == []  # oversold, trend undecided
+    assert rsi_at(t, 14, 80.0, TREND_UP) == []  # expensive, but the tape is up
+    assert rsi_at(t, 19, 30.0, TREND_DOWN) == []  # oversold *and* falling: a downtrend
+    assert t.rsi_state(1) == NEUTRAL
+    assert t.events_raised == 0
+
+
+def test_rsi_without_a_reading_or_without_a_trend_leaves_the_state_alone():
+    t = rsi_t(confirm_candles=1)
+    rsi_at(t, 4, 35.0, TREND_UP)  # ENTRY baseline
+    assert t.rsi_state(1) == ENTRY
+    assert rsi_at(t, 9, None, TREND_UP) == []  # fewer than 15 buckets yet
+    assert rsi_at(t, 14, 80.0, None) == []  # the indicators cannot judge the side
+    assert t.rsi_state(1) == ENTRY  # an unmeasurable bucket is not a verdict
+    assert t.events_raised == 0
+
+
+def test_a_late_candle_for_a_bucket_already_judged_is_not_judged_twice():
+    t = rsi_t(confirm_candles=1)
+    rsi_at(t, 9, 55.0, TREND_UP)  # the 09:24 close sets the baseline
+    assert t.rsi_state(1) == NEUTRAL
+    assert rsi_at(t, 4, 30.0, TREND_UP) == []  # a 09:19 bar arriving after it
+    assert t.rsi_state(1) == NEUTRAL
+
+
+def test_a_disarmed_rsi_strategy_still_stamps_the_state():
+    """The switch on /alerts governs the page, never the measurement the board shows."""
+    t = rsi_t(enabled=False, confirm_candles=1)
+    rsi_at(t, 4, 55.0, TREND_UP)  # NEUTRAL baseline
+    assert rsi_at(t, 9, 30.0, TREND_UP) == []
+    assert t.rsi_state(1) == ENTRY
+    assert t.events_raised == 0
+
+
+def test_the_two_levels_are_the_operators_not_the_engine_s():
+    t = rsi_t(oversold=45.0, overbought=55.0, confirm_candles=1)
+    rsi_at(t, 4, 50.0, TREND_UP)  # 50 is *above* the operator's entry line
+    assert t.rsi_state(1) == NEUTRAL
+    events = rsi_at(t, 9, 43.0, TREND_UP)  # 43 < 45 → ENTRY at the edited level
+    assert len(events) == 1
+    assert events[0].level == 45.0
+    assert len(rsi_at(t, 14, 57.0, TREND_DOWN)) == 1  # 57 > 55 → OVERBOUGHT
+    assert t.rsi_state(1) == OVERBOUGHT
+
+
+def test_the_rsi_event_carries_the_level_the_reading_and_the_line():
+    t = rsi_t(oversold=40.0, telegram=False, cooldown_minutes=45)  # the shipped 2 buckets
+    rsi_at(t, 4, 55.0, TREND_UP)
+    rsi_at(t, 9, 37.2, TREND_UP)
+    events = rsi_at(t, 14, 37.2, TREND_UP)
+    assert len(events) == 1
+    event = events[0]
+    assert (event.strategy, event.direction) == ("rsi", DOWN)  # a dip is a DOWN leg
+    assert (event.level, event.reading) == (40.0, 37.2)
+    assert event.exceed_pct == pytest.approx(2.8)  # RSI points past 40, not a price %
+    assert (event.cooldown_minutes, event.telegram) == (45, False)
+    assert event.reasons == ("strategy:rsi", "rsi_oversold", "confirmed_2_candles")
+    assert event.describe() == (
+        "TCS RSI-14 37.2 below 40 in an up-trend — entry at ₹100.00"
+    )
+    assert event.episode_id.endswith("-rsi-DOWN-37.2000")
+
+
+def test_a_deeper_dip_is_a_different_episode_not_a_duplicate():
+    """Keyed on the threshold these two rows would be identical, and the afternoon
+    dip — the one worth acting on — would be discarded as a duplicate."""
+    t = rsi_t(confirm_candles=1)
+    rsi_at(t, 4, 55.0, TREND_UP)  # NEUTRAL baseline
+    first = rsi_at(t, 9, 38.0, TREND_UP)[0]
+    assert len(rsi_at(t, 14, 55.0, TREND_UP)) == 0  # back to the band, silently
+    second = rsi_at(t, 19, 31.0, TREND_UP)[0]
+    assert second.episode_id != first.episode_id
+    assert second.exceed_pct > first.exceed_pct  # 31 is 9 points under 40, 38 is 2
+
+
+def test_recover_leaves_the_rsi_state_empty_until_a_live_bucket_closes():
+    """A stored minute carries no five-minute reading, so a mid-session restart shows
+    an em dash rather than a verdict nobody measured — and the first live close is a
+    baseline, not a page for a condition that was already standing."""
+    t = rsi_t(confirm_candles=1)
+    assert t.recover([(bar(o, 100.0), None) for o in range(10)]) == 10
+    assert t.rsi_state(1) is None
+    assert rsi_at(t, 14, 35.0, TREND_UP) == []  # 09:29, the first live close
+    assert t.rsi_state(1) == ENTRY
+
+
+def test_armed_summary_counts_the_states_the_universe_is_in():
+    t = rsi_t(confirm_candles=1)
+    rsi_at(t, 4, 35.0, TREND_UP)  # instrument 1: ENTRY baseline
+    t.on_candle(bar(4, 100.0, instrument_id=2), symbol="INFY", rsi_5m=75.0, trend=TREND_DOWN)
+    t.on_candle(bar(4, 100.0, instrument_id=3), symbol="WIPRO", rsi_5m=None, trend=None)
+    summary = t.armed_summary()
+    assert summary["rsi_judged"] == 2  # the third has no reading to judge
+    assert summary["rsi_entry"] == 1
+    assert summary["rsi_overbought"] == 1
+
+
+def test_an_rsi_reading_does_not_move_the_other_three_detectors():
+    t = BreakoutTracker(strategies=StrategiesConfig(), window=window())
+    seen: list[BreakoutEvent] = []
+    for offset, reading in [(4, 55.0), (9, 30.0), (14, 30.0), (19, 30.0)]:
+        seen += t.on_candle(bar(offset, 100.0), symbol="TCS", rsi_5m=reading, trend=TREND_UP)
+    assert [e.strategy for e in seen] == ["rsi"]  # baseline, 1 of 2, fire, silence
+    assert t.by_strategy == {"session_break": 0, "orb": 0, "vwap": 0, "rsi": 1}
+
+
 # ── tracker behaviour ───────────────────────────────────────────────────────
 
 
@@ -662,7 +886,12 @@ def test_counters_and_summary_report_what_fired():
     feed(t, five_flat())
     feed(t, [bar(5, 101.0)])
     assert t.events_raised == 1
-    assert t.by_strategy == {"session_break": 1, "orb": 0, "vwap": 0}
+    assert t.by_strategy == {"session_break": 1, "orb": 0, "vwap": 0, "rsi": 0}
     summary = t.armed_summary()
     assert summary["tracked_instruments"] == 1
     assert summary["ranges_known"] == 0
+    # The fourth detector reports how much of the universe it can read at all: a
+    # session with no fifteen-bucket history yet has nothing to judge, and the log
+    # has to be able to say that rather than look like a rule that never fires.
+    assert summary["rsi_judged"] == 0
+    assert summary["rsi_entry"] == 0 and summary["rsi_overbought"] == 0

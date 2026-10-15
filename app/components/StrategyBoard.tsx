@@ -6,25 +6,29 @@ import { useState } from "react";
 import {
   FIELD_LIMITS,
   PARAM_FIELDS,
+  SIGNAL_TYPE_FOR_DIRECTION,
   STRATEGIES,
   STRATEGY_COPY,
   formKey,
+  type ParamField,
   type StrategiesDoc,
   type StrategyKey,
 } from "@/lib/alert-strategies";
 
 /**
- * The three watches, each written as the sentence the detector actually applies.
+ * The four watches, each written as the sentence the detector actually applies.
  *
  * The numbers live *inside* the rule rather than in a column beside it, because
  * the question on this page is never "what is threshold_pct" — it is "how far
  * past the day high, on how much volume, before my phone rings". Reading the line
  * tells you the configuration; typing in it changes the one thing you meant to
  * change. Every field the worker owns is still reachable: a strategy that takes
- * two candles to confirm says so in its own sentence.
+ * two candles to confirm says so in its own sentence, and a field a detector does
+ * not read (`threshold_pct` on the RSI rule, the two levels on the other three)
+ * is not offered at all — see `EDITABLE_FIELDS`.
  *
- * One Save for the board, because the document is one row: three separate writes
- * would be three audit entries and three chances for the worker's next poll to
+ * One Save for the board, because the document is one row: four separate writes
+ * would be four audit entries and four chances for the worker's next poll to
  * read a half-saved set.
  */
 
@@ -106,7 +110,7 @@ export function StrategyBoard({ doc, activity }: { doc: StrategiesDoc; activity:
             disabled={busy}
             className="rounded border border-positive/40 bg-positive/10 px-3 py-1.5 text-[13px] font-semibold text-positive disabled:opacity-50"
           >
-            {busy ? "Saving…" : "Save all three"}
+            {busy ? "Saving…" : "Save all four"}
           </button>
           <button
             type="button"
@@ -154,7 +158,7 @@ function StrategyCard({
           <span className="num text-[10px] uppercase tracking-[0.12em] text-muted-2">{strategy}</span>
         </div>
         <div className="flex items-center gap-2">
-          {counts ? <TodayCounts counts={counts} /> : null}
+          {counts ? <TodayCounts strategy={strategy} counts={counts} /> : null}
           <Switch
             label={`${copy.label} armed`}
             on={enabled}
@@ -195,7 +199,7 @@ function StrategyCard({
  * not a security boundary.
  */
 function ruleLine(strategy: StrategyKey, values: Editor, set: (key: string, value: string) => void) {
-  const field = (name: (typeof PARAM_FIELDS)[number], width: number, unit: string) => (
+  const field = (name: ParamField, width: number, unit: string) => (
     <InlineNumber
       strategy={strategy}
       field={name}
@@ -229,11 +233,24 @@ function ruleLine(strategy: StrategyKey, values: Editor, set: (key: string, valu
       </>
     );
   }
+  if (strategy === "vwap") {
+    return (
+      <>
+        A close {field("threshold_pct", 4, "%")} across the session <Emphasis>VWAP</Emphasis> that holds for{" "}
+        {field("confirm_candles", 2, "candle(s)")} and carries {field("min_volume_ratio", 4, "×")} relative volume —
+        reclaim or loss, at most one page per {field("cooldown_minutes", 4, "min")}.
+      </>
+    );
+  }
+  // The RSI rule has no percentage in it: the two levels *are* its thresholds, which is
+  // why this sentence names them and leaves `threshold_pct` out — the worker never reads
+  // it here.
   return (
     <>
-      A close {field("threshold_pct", 4, "%")} across the session <Emphasis>VWAP</Emphasis> that holds for{" "}
-      {field("confirm_candles", 2, "candle(s)")} and carries {field("min_volume_ratio", 4, "×")} relative volume —
-      reclaim or loss, at most one page per {field("cooldown_minutes", 4, "min")}.
+      When a five-minute bucket <Emphasis>closes</Emphasis> with its RSI under {field("oversold", 3, "")} while the
+      trend is <Emphasis>up</Emphasis>, or over {field("overbought", 3, "")} while it is <Emphasis>down</Emphasis>, held
+      for {field("confirm_candles", 2, "bucket(s)")} and carrying {field("min_volume_ratio", 4, "×")} relative volume (0
+      = no gate) — one page per {field("cooldown_minutes", 4, "min")}.
     </>
   );
 }
@@ -259,7 +276,7 @@ function InlineNumber({
   onChange,
 }: {
   strategy: StrategyKey;
-  field: (typeof PARAM_FIELDS)[number];
+  field: ParamField;
   unit: string;
   width: number;
   value: string;
@@ -312,18 +329,39 @@ function Switch({ label, on: isOn, onChange }: { label: string; on: boolean; onC
   );
 }
 
-function TodayCounts({ counts }: { counts: { up: number; down: number } }) {
-  const total = counts.up + counts.down;
-  const href = `/signals?type=${total === 0 ? "" : counts.up >= counts.down ? "BREAKOUT_UP" : "BREAKDOWN"}`;
+/**
+ * Which of a strategy's two directions is the side the rule calls good news.
+ *
+ * For the three level detectors it is the up leg. For the RSI rule it is the
+ * **down** leg, because an entry is a dip inside an up-trend — the same inversion the
+ * worker's own `verdict == ENTRY → direction DOWN` mapping makes, and the reason this
+ * tile cannot be a fixed "up on the left, green" for all four cards.
+ */
+const GREEN_LEG: Record<StrategyKey, "UP" | "DOWN"> = {
+  session_break: "UP",
+  orb: "UP",
+  vwap: "UP",
+  rsi: "DOWN",
+};
+
+function TodayCounts({ strategy, counts }: { strategy: StrategyKey; counts: { up: number; down: number } }) {
+  const types = SIGNAL_TYPE_FOR_DIRECTION[strategy];
+  const green = GREEN_LEG[strategy];
+  const red = green === "UP" ? "DOWN" : "UP";
+  const greenCount = green === "UP" ? counts.up : counts.down;
+  const redCount = green === "UP" ? counts.down : counts.up;
+  const total = greenCount + redCount;
+  const chosen = greenCount >= redCount ? green : red;
+  const href = `/signals?type=${total === 0 ? "" : types[chosen]}`;
   return (
     <Link
       href={total === 0 ? "/signals" : href}
-      title="Level breaks this strategy raised today — the rows it wrote, not the messages it sent"
+      title={`${STRATEGY_COPY[strategy].label}: the rows this rule wrote today — the signal feed, not the messages it sent`}
       className="chip border-line bg-surface-2 text-muted hover:border-line-2 hover:text-ink-2"
     >
-      today <span className="num text-positive">{counts.up}</span>
+      today <span className="num text-positive">{greenCount}</span>
       <span className="text-muted-2">/</span>
-      <span className="num text-negative">{counts.down}</span>
+      <span className="num text-negative">{redCount}</span>
     </Link>
   );
 }

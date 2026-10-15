@@ -295,6 +295,49 @@ async def test_snapshot_per_candle_with_hand_computed_session_vwap_and_ema():
     assert s.store.snapshots[(1, minute(7))].ema_fast is None, "EMA9 must be None before its seed"
 
 
+async def test_the_five_minute_rsi_is_measured_once_per_bucket_and_stamped_on_its_candle():
+    """The operator's entry rule needs a *five-minute* RSI, and only the pipeline can
+    show that it is really measured: the reading is taken once per bucket close by the
+    indicator engine, judged once per bucket close by the detector, and both land on
+    the snapshot of the candle that produced them.
+
+    ``rising_ticks`` climbs every minute, so its RSI-14 pins near 100 — and the whole
+    point of the 2026-10-15 reversal is that a 100 in an up-trend is **NEUTRAL**: the
+    red side of the rule is an expensive print inside a *down*-trend, and the green
+    side is a dip inside an up one. Under the retired momentum reading this tape was
+    the bullish case.
+    """
+    s = await build([inst(1)], {1: rising_ticks(minutes=80)})
+    await s.connect()
+    await s.run_minutes(80)
+
+    # Wilder's recursion needs 15 closes, and a close comes every 5 minutes: the
+    # 15th bucket of this session ends at 09:15 + 74 minutes, so that is the first
+    # candle allowed to carry a reading. Not one before it.
+    first_reading_at = minute(74)
+    for offset in range(80):
+        snap = s.store.snapshots[(1, minute(offset))]
+        if minute(offset) < first_reading_at:
+            assert snap.rsi_5m is None, f"minute {offset} has no fifteenth bucket yet"
+            assert snap.rsi_state is None, "and nothing to judge from it"
+    assert s.store.snapshots[(1, first_reading_at)].rsi_5m is not None
+    assert s.store.snapshots[(1, minute(79))].rsi_5m is not None
+
+    # The reading belongs to the bucket, so the four minutes inside it repeat it
+    # rather than inventing a fresh number per minute — and the state travels with it.
+    assert s.store.snapshots[(1, minute(75))].rsi_5m == s.store.snapshots[
+        (1, minute(79))
+    ].rsi_5m, "a mid-bucket minute carries the last close's reading, not a new one"
+    last = s.store.snapshots[(1, minute(79))]
+    assert last.rsi_5m > 60.0, "a tape that only rises has an RSI pinned at the top"
+    assert last.rsi_state == "NEUTRAL", "…and an up-trend, so it is neither side of the rule"
+    assert last.rsi_state == s.pipeline.breakouts.rsi_state(1), (
+        "the row and the detector's standing verdict are the same decision, made once"
+    )
+    assert s.signals_of(SignalType.RSI_ENTRY) == []
+    assert s.signals_of(SignalType.RSI_OVERBOUGHT) == []
+
+
 async def test_nothing_is_evaluable_before_warmup_and_warmup_report_shrinks():
     # spec §8.4/§10: warm-up gates evaluation; nothing may qualify while
     # candles_seen < warmup_candles_required (20) or indicators are not warm.

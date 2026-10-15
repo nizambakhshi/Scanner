@@ -559,3 +559,126 @@ async def test_a_breakout_is_suppressed_by_cooldown_only_after_a_pushed_alert(st
     assert second.suppressed_reason == "cooldown 15m"
     assert third.suppressed_reason == "cooldown 15m", "the window does not extend itself"
     assert all(d.delivery_status is DeliveryStatus.SUPPRESSED for d in dashboard_rows(store)[1:])
+
+
+# ── the fourth strategy: a reading, not a price move (operator rule 2026-10-15) ─
+
+
+def as_rsi(**overrides: Any) -> BreakoutEvent:
+    """The green side exactly as the ``rsi`` detector hands it over: Wilder RSI-14 on
+    the five-minute closes printed 37.2 while the tape was up, so the break *down*
+    through 40 is the entry. Note what is absent: no volume ratio (the rule is
+    deliberately not gated on volume) and no VWAP (40 is not a price)."""
+    base: dict[str, Any] = {
+        "strategy": "rsi",
+        "direction": "DOWN",
+        "level": 40.0,
+        "reading": 37.2,
+        "price": 100.5,
+        "volume_ratio": None,
+        "cooldown_minutes": 30,
+        "reasons": ("strategy:rsi", "rsi_oversold", "confirmed_2_candles"),
+    }
+    base.update(overrides)
+    return event(**base)
+
+
+async def test_the_two_rsi_sides_get_their_own_signal_types(alerts):
+    # Not BREAKOUT_UP / BREAKDOWN: a green, actionable dip must not be filed under a
+    # word that reads like a warning, which is the whole reason the reversal happened.
+    entry = await alerts.raise_breakout(as_rsi(), session_id=1)
+    warning = await alerts.raise_breakout(
+        as_rsi(
+            direction="UP",
+            level=60.0,
+            reading=63.4,
+            reasons=("strategy:rsi", "rsi_overbought", "confirmed_2_candles"),
+        ),
+        session_id=1,
+    )
+    assert entry.signal.signal_type is SignalType.RSI_ENTRY
+    assert warning.signal.signal_type is SignalType.RSI_OVERBOUGHT
+    assert entry.signal.reasons[0] == "strategy:rsi"
+    assert entry.signal.vwap is None, "40 is an RSI threshold; a chart must not draw it as a VWAP"
+    assert "RSI-14 37.2 below 40 in an up-trend — entry at ₹100.50" in (entry.signal.message or "")
+    assert (
+        "RSI-14 63.4 above 60 in a down-trend — overbought at ₹100.50"
+        in (warning.signal.message or "")
+    )
+
+
+async def test_an_rsi_entry_is_pushed_and_reads_like_a_person_wrote_it(alerts, store):
+    # The type name reaches a phone through format_message's first line, and title()
+    # of RSI_ENTRY is "Rsi Entry" — hence the hand-written labels.
+    result = await alerts.raise_breakout(as_rsi(), session_id=1, previous_close=100.0)
+    assert result.created is True, "RSI_ENTRY is in the pushed set"
+    text = format_message(result.signal, deep_link=None)
+    assert text.startswith("🟢 RSI entry — RELIANCE")
+    assert "(+0.50% vs prev close)" in text
+    assert "RSI-14 37.2 below 40" in text
+    assert "Relative volume" not in text, "this rule has no volume evidence to show"
+    assert telegram_rows(store), "the entry side pages the phone when Telegram is armed"
+
+
+async def test_the_overbought_side_is_the_red_one(alerts):
+    result = await alerts.raise_breakout(
+        as_rsi(direction="UP", level=60.0, reading=63.4), session_id=1
+    )
+    assert format_message(result.signal, deep_link=None).startswith("🔴 RSI overbought — RELIANCE")
+
+
+async def test_the_retired_pair_still_renders_and_pages_nobody(alerts, store):
+    # RSI_BULLISH / RSI_BEARISH are raised by nothing any more, but rows written
+    # before today stay readable: the emoji table keeps their glyphs so an old row
+    # re-rendered on the board does not turn into an information icon, and neither
+    # type is in the pushed set, so re-raising one cannot page anybody.
+    old = await alerts.raise_alert(
+        signal_type=SignalType.RSI_BULLISH,
+        instrument_id=1,
+        session_id=1,
+        event_timestamp=minute(0),
+        episode_id="history-1",
+        symbol="RELIANCE",
+        message="Daily RSI 63.2 · weekly RSI 61.8 — both above 60",
+    )
+    assert old.created is True
+    assert format_message(old.signal, deep_link=None).startswith("📈 Rsi Bullish — RELIANCE")
+    assert telegram_rows(store) == [], "a retired type is not a pushed type"
+
+
+async def test_the_rsi_window_is_its_own_and_never_touches_a_price_break(alerts, store):
+    day = await alerts.raise_breakout(event(), session_id=1)
+    rsi = await alerts.raise_breakout(as_rsi(candle_start=minute(2)), session_id=1)
+    assert day.created and rsi.created
+    assert rsi.suppressed_reason is None, "a reading through 40 is not a second leg of a day high"
+
+    # The same side again 18 minutes later is the same drift: new episode id (the
+    # reading moved), so the database accepts the row — and the strategy's 30-minute
+    # window is what keeps it off the phone.
+    again = await alerts.raise_breakout(
+        as_rsi(candle_start=minute(20), reading=36.1), session_id=1
+    )
+    assert again.created is True
+    assert again.suppressed_reason == "cooldown 30m"
+    assert len(telegram_rows(store)) == 2, "the day break and the first entry, and no third"
+
+
+async def test_the_nightly_pair_and_the_intraday_rule_do_not_mute_each_other(alerts, store):
+    # Both horizons raise RSI_ENTRY. The nightly one asks for no window at all — its
+    # (type, instrument, session) key already makes it once per session — so a
+    # session-start alert can never be muted by an intraday reading, and vice versa.
+    intraday = await alerts.raise_breakout(as_rsi(), session_id=1)
+    nightly = await alerts.raise_alert(
+        signal_type=SignalType.RSI_ENTRY,
+        instrument_id=1,
+        session_id=1,
+        event_timestamp=minute(3),
+        episode_id="nightly-1",
+        cooldown_minutes=0,
+        reasons=("daily_below_40", "weekly_below_40"),
+        message="Daily RSI 38.4 · weekly RSI 35.1 — both below 40",
+        symbol="RELIANCE",
+    )
+    assert intraday.created and nightly.created
+    assert intraday.suppressed_reason is None and nightly.suppressed_reason is None
+    assert len(telegram_rows(store)) == 2

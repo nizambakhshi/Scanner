@@ -1,12 +1,12 @@
-"""Breakout / breakdown detectors: day break, opening range, VWAP reclaim-loss.
+"""Breakout / breakdown detectors: day break, opening range, VWAP reclaim-loss, RSI entry.
 
-Operator feature (2026-10-14): three strategies the scanner did not have. The
-bullish scanner answers "is this stock setting up?"; these answer "did this stock
-just *do* something?", evaluated on every completed 1-minute candle of the whole
-configured universe — not only the watchlist, because a day high on a stock that
-never qualified is still a day high.
+Operator features (2026-10-14, and the fourth rule on 2026-10-15): strategies the
+bullish scanner did not have. The bullish scanner answers "is this stock setting
+up?"; these answer "did this stock just *do* something?", evaluated on every
+completed 1-minute candle of the whole configured universe — not only the
+watchlist, because a day high on a stock that never qualified is still a day high.
 
-The three definitions, stated so this file and the dashboard can be compared:
+The four definitions, stated so this file and the dashboard can be compared:
 
 * ``session_break`` — a **close** above the session high recorded *before* this
   candle (or below the session low), by more than ``threshold_pct``. Breaking the
@@ -26,6 +26,27 @@ The three definitions, stated so this file and the dashboard can be compared:
   cannot flapping-alert, and the first determination of the day treated as the
   baseline rather than as a cross — the same rollout rule the two-timeframe RSI
   alerts use.
+
+* ``rsi`` — the operator's entry rule, restated 2026-10-15 as "RSI below 40 is
+  green, an entry; above 60 is red", and *at the time of* a trend. Wilder RSI-14 on
+  the session's 5-minute closes, judged against the trend the scanner already
+  measures:
+
+  ``ENTRY`` (green)      RSI below ``oversold`` while the trend is **up**.
+  ``OVERBOUGHT`` (red)   RSI above ``overbought`` while the trend is **down**.
+  ``NEUTRAL``            the band, or an extreme the trend does not confirm.
+
+  An oversold print inside a downtrend is a falling tape, not a dip to buy, and the
+  same print with the EMAs crossed down pages all day — which is why the trend is
+  part of the rule and not a footnote. The state is judged on **every** bucket close
+  whether or not this strategy is armed: it is a measurement recorded on the candle
+  and shown live on the board, and the ``enabled`` switch governs the *alert*, the
+  same way disarming ORB never deletes the opening range.
+
+  ``confirm_candles`` here counts **buckets**, not minutes: one 5-minute print below
+  40 is a spike, two in a row is a reading. ``min_volume_ratio`` defaults to 0
+  (gate off) because the whole point of the rule is the quiet pullback, and a
+  volume surge at the bottom is news about the crowd, not about the level.
 
 Two dedupe mechanisms, deliberately different:
 
@@ -58,15 +79,17 @@ from datetime import date, datetime
 from typing import Any, Protocol
 
 from ..timeutils import SessionWindow, to_ist
+from .rsi import ENTRY, NEUTRAL, OVERBOUGHT, classify_intraday, closes_bucket
 
-#: The three strategy keys, in display order. Also the JSON keys of
+#: The strategy keys, in display order. Also the JSON keys of
 #: ``ops_settings['alert_strategies']`` and the names the dashboard renders.
-STRATEGIES = ("session_break", "orb", "vwap")
+STRATEGIES = ("session_break", "orb", "vwap", "rsi")
 
 STRATEGY_LABELS = {
     "session_break": "Session high / low break",
     "orb": "Opening range break",
     "vwap": "VWAP reclaim / loss",
+    "rsi": "RSI entry / overbought",
 }
 
 UP = "UP"
@@ -100,7 +123,13 @@ class Bar(Protocol):
 
 @dataclass(frozen=True)
 class StrategyParams:
-    """One strategy's tunables: the stored shape and the edited shape."""
+    """One strategy's tunables: the stored shape and the edited shape.
+
+    ``oversold``/``overbought`` belong to ``rsi`` — the two RSI levels the operator
+    named (40 and 60). They are carried on the shared shape rather than a subclass
+    so one document, one parser and one editor page cover every strategy; a
+    strategy that ignores them still stores and returns them at the defaults.
+    """
 
     enabled: bool = True
     threshold_pct: float = 0.10
@@ -108,6 +137,8 @@ class StrategyParams:
     min_volume_ratio: float = 1.0
     cooldown_minutes: int = 15
     telegram: bool = True
+    oversold: float = 40.0
+    overbought: float = 60.0
 
     def problems(self, name: str) -> list[str]:
         found: list[str] = []
@@ -119,6 +150,10 @@ class StrategyParams:
             found.append(f"{name}: min_volume_ratio must be between 0 and 10")
         if not 0 <= self.cooldown_minutes <= 240:
             found.append(f"{name}: cooldown_minutes must be between 0 and 240")
+        if not 0.0 < self.oversold < self.overbought < 100.0:
+            found.append(
+                f"{name}: oversold/overbought must be 0 < oversold < overbought < 100"
+            )
         return found
 
     def to_dict(self) -> dict[str, Any]:
@@ -129,6 +164,8 @@ class StrategyParams:
             "min_volume_ratio": self.min_volume_ratio,
             "cooldown_minutes": self.cooldown_minutes,
             "telegram": self.telegram,
+            "oversold": self.oversold,
+            "overbought": self.overbought,
         }
 
 
@@ -162,6 +199,20 @@ DEFAULTS: dict[str, StrategyParams] = {
         cooldown_minutes=10,
         telegram=True,
     ),
+    # The operator's own two numbers, and the only reason this strategy exists.
+    # Two buckets (10 minutes) rather than one so a single printed low cannot page;
+    # 30 minutes because an RSI that hugs 40 in a slow drift is one piece of news,
+    # not six; no volume gate, for the reason stated in the module docstring.
+    "rsi": StrategyParams(
+        enabled=True,
+        threshold_pct=0.0,
+        confirm_candles=2,
+        min_volume_ratio=0.0,
+        cooldown_minutes=30,
+        telegram=True,
+        oversold=40.0,
+        overbought=60.0,
+    ),
 }
 
 
@@ -172,6 +223,7 @@ class StrategiesConfig:
     session_break: StrategyParams = field(default_factory=lambda: DEFAULTS["session_break"])
     orb: StrategyParams = field(default_factory=lambda: DEFAULTS["orb"])
     vwap: StrategyParams = field(default_factory=lambda: DEFAULTS["vwap"])
+    rsi: StrategyParams = field(default_factory=lambda: DEFAULTS["rsi"])
 
     def get(self, strategy: str) -> StrategyParams:
         if strategy not in STRATEGIES:
@@ -261,9 +313,13 @@ def parse_strategies(payload: Any) -> StrategiesConfig:
                 enabled=_as_bool(raw.get("enabled"), defaults.enabled),
                 threshold_pct=_as_number(raw.get("threshold_pct"), defaults.threshold_pct),
                 confirm_candles=_as_int(raw.get("confirm_candles"), defaults.confirm_candles),
-                min_volume_ratio=_as_number(raw.get("min_volume_ratio"), defaults.min_volume_ratio),
+                min_volume_ratio=_as_number(
+                    raw.get("min_volume_ratio"), defaults.min_volume_ratio
+                ),
                 cooldown_minutes=_as_int(raw.get("cooldown_minutes"), defaults.cooldown_minutes),
                 telegram=_as_bool(raw.get("telegram"), defaults.telegram),
+                oversold=_as_number(raw.get("oversold"), defaults.oversold),
+                overbought=_as_number(raw.get("overbought"), defaults.overbought),
             )
         except ValueError as exc:
             problems.append(f"{key}: {exc}")
@@ -327,6 +383,10 @@ class BreakoutEvent:
     cooldown_minutes: int
     telegram: bool
     reasons: tuple[str, ...] = ()
+    #: The measured RSI, for the ``rsi`` strategy only — its ``level`` is the
+    #: threshold that was crossed (40 / 60), and a person reading the alert wants
+    #: the number, not the band. ``None`` for every other strategy.
+    reading: float | None = None
 
     @property
     def is_up(self) -> bool:
@@ -334,7 +394,18 @@ class BreakoutEvent:
 
     @property
     def exceed_pct(self) -> float:
-        """How far past the level the close finished, as a positive percentage."""
+        """How far past the level the break finished.
+
+        A percentage of price for the three level strategies — how much the tape
+        cleared the day high by. For ``rsi`` a price percentage of an RSI threshold
+        would be meaningless, so it is **RSI points** past the level instead
+        (37.2 below 40 is 2.8). The two uses never mix in one number, and the
+        message says which one it is printing.
+        """
+        if self.strategy == "rsi":
+            if self.reading is None:
+                return 0.0
+            return abs(self.reading - self.level)
         if self.level <= 0:
             return 0.0
         if self.is_up:
@@ -343,14 +414,34 @@ class BreakoutEvent:
 
     @property
     def episode_id(self) -> str:
-        """Level-keyed identity: one alert per level per direction per session."""
+        """Level-keyed identity: one alert per level per direction per session.
+
+        ``rsi`` keys on the *reading* rather than the threshold, because its level
+        is a fixed 40 or 60 for the whole day: keyed on the threshold, a stock that
+        dips to 38, recovers, and sinks to 31 in the afternoon would produce one row
+        and one page, and the second, deeper dip — the one worth acting on — would be
+        discarded as a duplicate. The strategy's own cooldown is what keeps the
+        tape from paging on every point of that drift.
+        """
+        mark = self.level if self.reading is None else self.reading
         return (
             f"{self.trading_date.isoformat()}-{self.instrument_id}"
-            f"-{self.strategy}-{self.direction}-{self.level:.4f}"
+            f"-{self.strategy}-{self.direction}-{mark:.4f}"
         )
 
     def describe(self) -> str:
         """The line a person reads, without needing the dashboard open."""
+        if self.strategy == "rsi":
+            reading = 0.0 if self.reading is None else self.reading
+            if self.direction == DOWN:
+                return (
+                    f"{self.symbol} RSI-14 {reading:.1f} below {self.level:g} "
+                    f"in an up-trend — entry at ₹{self.price:,.2f}"
+                )
+            return (
+                f"{self.symbol} RSI-14 {reading:.1f} above {self.level:g} "
+                f"in a down-trend — overbought at ₹{self.price:,.2f}"
+            )
         what = {
             ("session_break", UP): "broke the day high",
             ("session_break", DOWN): "broke the day low",
@@ -448,6 +539,26 @@ class _Vwap:
 
 
 @dataclass
+class _Rsi:
+    """The RSI rule's memory: the standing state, plus the buckets behind a new one.
+
+    ``state`` is what the dashboard reads (via :meth:`BreakoutTracker.rsi_state`)
+    and what the snapshot records, so the board, the row and the alert cannot
+    disagree. ``pending``/``streak`` count *consecutive five-minute buckets* that
+    agree on a state the tracker does not yet hold — the confirmation is a property
+    of the candidate, so an ENTRY building a streak while an earlier OVERBOUGHT
+    streak is abandoned starts at one, not at two.
+    """
+
+    state: str | None = None
+    pending: str | None = None
+    streak: int = 0
+    reading: float | None = None
+    trend: str | None = None
+    last_close_at: datetime | None = None
+
+
+@dataclass
 class _InstrumentState:
     instrument_id: int
     trading_date: date
@@ -455,10 +566,11 @@ class _InstrumentState:
     session: _SessionBreak = field(default_factory=_SessionBreak)
     orb: _Orb = field(default_factory=_Orb)
     vwap: _Vwap = field(default_factory=_Vwap)
+    rsi: _Rsi = field(default_factory=_Rsi)
 
 
 class BreakoutTracker:
-    """Runs the three detectors over a stream of completed 1-minute candles."""
+    """Runs the four detectors over a stream of completed 1-minute candles."""
 
     def __init__(
         self,
@@ -511,6 +623,8 @@ class BreakoutTracker:
         symbol: str = "",
         vwap: float | None = None,
         relative_volume: float | None = None,
+        rsi_5m: float | None = None,
+        trend: str | None = None,
     ) -> list[BreakoutEvent]:
         """Evaluate one completed candle; returns 0..n events, at most one per strategy.
 
@@ -519,6 +633,11 @@ class BreakoutTracker:
         restart must never arm today's levels, and today's state must survive a
         late foreign bar — and a candle outside 09:15–15:30 still counts toward the
         day break but never enters an ORB bucket, the same cut the board's SQL makes.
+
+        ``rsi_5m`` and ``trend`` feed the fourth detector and are ignored by the
+        other three. Both are measured elsewhere — the reading by the indicator
+        engine, the trend by the scanner — because the tracker must not keep a second
+        implementation of either; see :meth:`_rsi`.
         """
         if candle.trading_date != self.window.trading_date:
             return []
@@ -533,6 +652,9 @@ class BreakoutTracker:
         )
         events += self._orb(state, candle)
         events += self._vwap(state, candle, vwap, relative_volume)
+        # This one judges the state whether or not it is armed: the reading belongs
+        # on the candle and on the board, and `enabled` governs only the page.
+        events += self._rsi(state, candle, rsi_5m, trend, relative_volume)
         # Only now does this candle become history for the next one.
         session.high = candle.high if prior_high is None else max(prior_high, candle.high)
         session.low = candle.low if prior_low is None else min(prior_low, candle.low)
@@ -559,6 +681,14 @@ class BreakoutTracker:
         of that candle (``None`` where it cannot be reproduced). The relative-volume
         gate is deliberately not replayed — a stored minute has no honest ratio
         attached, and the live path recomputes it from the next candle onward.
+
+        The RSI detector is the one rule that cannot be rebuilt this way, because a
+        stored minute carries no five-minute reading: replaying without one leaves
+        ``rsi_state`` empty until the next live bucket close, where the verdict is
+        adopted as a baseline rather than paged. That is the intended behaviour — a
+        restart should not phone the operator about a condition that was already
+        standing before it — but it does mean the board's RSI column starts at the
+        restart, not at 09:15, on a day the worker came back up mid-session.
         """
         self._muted = True
         folded = 0
@@ -593,11 +723,18 @@ class BreakoutTracker:
 
     def armed_summary(self) -> dict[str, Any]:
         """Small observability view for the heartbeat log."""
+        states = [s.rsi.state for s in self._state.values()]
         return {
             "tracked_instruments": len(self._state),
             "events_raised": self.events_raised,
             "by_strategy": dict(self.by_strategy),
             "ranges_known": sum(1 for s in self._state.values() if s.orb.or_high is not None),
+            # How much of the universe the fourth detector can actually read: a low
+            # ``rsi_judged`` an hour into the session means the tape, not the rule, is
+            # the reason nothing is on the board.
+            "rsi_judged": sum(1 for state in states if state is not None),
+            "rsi_entry": states.count(ENTRY),
+            "rsi_overbought": states.count(OVERBOUGHT),
         }
 
     # ── session high / low ────────────────────────────────────────────────
@@ -840,6 +977,96 @@ class BreakoutTracker:
             )
         ]
 
+    # ── RSI entry / overbought ────────────────────────────────────────────
+    def _rsi(
+        self,
+        state: _InstrumentState,
+        candle: Bar,
+        rsi_5m: float | None,
+        trend: str | None,
+        relative_volume: float | None,
+    ) -> list[BreakoutEvent]:
+        """Judge the standing RSI state at every five-minute bucket close.
+
+        The reading arrives already computed and the trend already decided, and that
+        is deliberate: the indicator engine owns Wilder's recursion, the scanner owns
+        "close above VWAP with the EMAs crossed up", and this method owns only what
+        the operator's two numbers mean *together*. One implementation of the rule is
+        what keeps the badge on the row, the board, and the Telegram line honest with
+        each other.
+        """
+        params = self.strategies.rsi
+        rs = state.rsi
+        # Only the candle that *closes* a bucket carries a new reading. The four
+        # inside it hold the previous one, and re-judging a held value as if it were
+        # fresh would count one dip five times and call it a confirmation.
+        if not closes_bucket(candle.candle_start):
+            return []
+        if rs.last_close_at is not None and candle.candle_start <= rs.last_close_at:
+            return []  # a late or replayed candle for a bucket already judged
+        if rsi_5m is None or trend is None:
+            return []  # fewer than 15 buckets yet, or the indicators cannot judge
+        rs.last_close_at = candle.candle_start
+        rs.reading = rsi_5m
+        rs.trend = trend
+        verdict = classify_intraday(
+            rsi_5m,
+            trend,
+            entry_threshold=params.oversold,
+            overbought_threshold=params.overbought,
+        )
+        if verdict is None:  # only for a missing reading, already handled above
+            return []
+        if rs.state is None or verdict == rs.state or verdict == NEUTRAL:
+            # Two silences, both inherited from the VWAP detector. The first
+            # determination of the tape is a baseline, not a transition — a stock
+            # whose opening buckets print oversold in an uptrend has not *done*
+            # anything yet. And leaving a named state for the band is not news: it is
+            # the dip being over.
+            rs.state = verdict
+            rs.pending = None
+            rs.streak = 0
+            return []
+        if verdict == rs.pending:
+            rs.streak += 1
+        else:
+            # A different side starts its own count; the abandoned one's buckets are
+            # evidence about a state nobody is claiming.
+            rs.pending = verdict
+            rs.streak = 1
+        if rs.streak < params.confirm_candles:
+            return []
+        if not _gate(relative_volume, params.min_volume_ratio):
+            # A confirmed reading with no volume behind it is dropped and the count
+            # restarts: "consecutive buckets" cannot survive one the gate rejected.
+            rs.pending = None
+            rs.streak = 0
+            return []
+        # The state is adopted whether or not the strategy is armed — the switch
+        # governs the page, never the measurement the board shows.
+        rs.state = verdict
+        rs.pending = None
+        rs.streak = 0
+        if not params.enabled:
+            return []
+        if verdict == ENTRY:
+            direction, level, code = DOWN, params.oversold, "rsi_oversold"
+        else:
+            direction, level, code = UP, params.overbought, "rsi_overbought"
+        return [
+            self._event(
+                params,
+                state=state,
+                strategy="rsi",
+                direction=direction,
+                candle=candle,
+                level=level,
+                ratio=relative_volume,
+                code=code,
+                reading=rsi_5m,
+            )
+        ]
+
     # ── event construction ────────────────────────────────────────────────
     def _event(
         self,
@@ -852,6 +1079,7 @@ class BreakoutTracker:
         level: float,
         ratio: float | None,
         code: str,
+        reading: float | None = None,
     ) -> BreakoutEvent:
         return self._bucket_event(
             params,
@@ -863,6 +1091,7 @@ class BreakoutTracker:
             price=candle.close,
             ratio=ratio,
             code=code,
+            reading=reading,
         )
 
     def _bucket_event(
@@ -877,6 +1106,7 @@ class BreakoutTracker:
         price: float,
         ratio: float | None,
         code: str,
+        reading: float | None = None,
     ) -> BreakoutEvent:
         """Assemble one event.
 
@@ -897,4 +1127,18 @@ class BreakoutTracker:
             cooldown_minutes=params.cooldown_minutes,
             telegram=params.telegram,
             reasons=_reasons(strategy, code, params, ratio),
+            reading=None if reading is None else round(float(reading), 4),
         )
+
+    def rsi_state(self, instrument_id: int) -> str | None:
+        """The RSI rule's standing verdict for one instrument.
+
+        Read by the pipeline to stamp ``indicator_snapshots.rsi_state`` *after* the
+        candle has been judged: the snapshot row and the alert therefore carry the
+        same word, decided once. ``None`` means "not evaluable yet" — the young
+        session has fewer than fifteen buckets, and an em dash on the dashboard is
+        truer than a NEUTRAL nobody measured.
+        """
+        state = self._state.get(instrument_id)
+        return None if state is None else state.rsi.state
+

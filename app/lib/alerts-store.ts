@@ -27,6 +27,7 @@ import { usesPostgres } from "./env";
 import { storedDocument, toIst } from "./format";
 import {
   DEFAULT_PARAMS,
+  SIGNAL_TYPE_FOR_DIRECTION,
   STRATEGIES,
   defaultStrategies,
   parseStrategies,
@@ -322,8 +323,8 @@ export async function recordTelegramTest(input: {
 export type StrategyActivity = Record<StrategyKey, { up: number; down: number }>;
 
 /**
- * How many level breaks each strategy actually raised today, straight from the
- * rows the detectors produced.
+ * How many rows each strategy actually raised today, straight from the signals the
+ * detectors produced.
  *
  * This is the evidence that a switch on the page means something: a strategy
  * marked on with a zero count and a full board is a different conversation from a
@@ -331,28 +332,36 @@ export type StrategyActivity = Record<StrategyKey, { up: number; down: number }>
  * `strategy:<name>` code the worker puts first in `reasons`, which is the only
  * place the discriminator survives into the database.
  *
+ * Each strategy's two counts are the two signal *types* that strategy writes, read
+ * from `SIGNAL_TYPE_FOR_DIRECTION` rather than hardcoded: the RSI rule writes
+ * `RSI_ENTRY` / `RSI_OVERBOUGHT`, and a query that only knew `BREAKOUT_UP` would
+ * report zero for a rule that paged all morning. The interpolated names are this
+ * module's own literals, not request input.
+ *
  * `null` when the app is on the replay sample — there is no session to count.
  */
 export async function readActivityToday(): Promise<StrategyActivity | null> {
   if (!usesPostgres()) return null;
-  const selects = STRATEGIES.flatMap((key) => [
-    `count(*) FILTER (WHERE reasons @> ARRAY['strategy:${key}'] AND signal_type = 'BREAKOUT_UP')::int AS ${key}_up`,
-    `count(*) FILTER (WHERE reasons @> ARRAY['strategy:${key}'] AND signal_type = 'BREAKDOWN')::int AS ${key}_down`,
-  ]);
+  const selects = STRATEGIES.flatMap((key) => {
+    const types = SIGNAL_TYPE_FOR_DIRECTION[key];
+    return [
+      `count(*) FILTER (WHERE reasons @> ARRAY['strategy:${key}'] AND signal_type = '${types.UP}')::int AS ${key}_up`,
+      `count(*) FILTER (WHERE reasons @> ARRAY['strategy:${key}'] AND signal_type = '${types.DOWN}')::int AS ${key}_down`,
+    ];
+  });
+  const countedTypes = [...new Set(STRATEGIES.flatMap((key) => Object.values(SIGNAL_TYPE_FOR_DIRECTION[key])))];
   const rows = await query<Raw>(
     `SELECT ${selects.join(", ")}
      FROM signals
-     WHERE signal_type IN ('BREAKOUT_UP', 'BREAKDOWN')
+     WHERE signal_type IN (${countedTypes.map((type) => `'${type}'`).join(", ")})
        AND event_timestamp >= ((now() AT TIME ZONE 'Asia/Kolkata')::date::timestamp + time '09:15')
                                     AT TIME ZONE 'Asia/Kolkata'`,
   );
   const row = rows[0];
   if (!row) return null;
-  const activity = {
-    session_break: { up: 0, down: 0 },
-    orb: { up: 0, down: 0 },
-    vwap: { up: 0, down: 0 },
-  } as StrategyActivity;
+  const activity = Object.fromEntries(
+    STRATEGIES.map((key) => [key, { up: 0, down: 0 }]),
+  ) as unknown as StrategyActivity;
   for (const key of STRATEGIES) {
     activity[key] = {
       up: Number(row[`${key}_up`] ?? 0) || 0,
