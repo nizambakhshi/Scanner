@@ -7,16 +7,92 @@
   The whole visual budget goes on legibility at a glance. One near-black ground,
   one slightly lighter panel, hairline rules instead of shadows. Green and red
   belong to direction only; amber means "check this"; the electric blue is the
-  only interactive hue. Numbers are IBM Plex Mono with tabular figures so a
-  column of prices reads as a scale; labels and legends are Barlow Semi
-  Condensed, compact and uppercase, the way an instrument prints its face.
+  only interactive hue.
 
   The night board below is the default. `html[data-theme="light"]` further down
   redraws the same instrument in daylight; the theme button in the chrome switches
   between them and remembers the choice. Every colour a component uses is one of
   these tokens, so switching is a token swap and no component knows which board it
   is on — including the SVG charts, which read these same variables.
+
+  Typography is the same three faces the Cadence board runs on, self-hosted from
+  `public/fonts` as latin-subset woff2 — no build-time fetch and no font CDN at
+  view time, so an offline machine still gets the intended board:
+
+    IBM Plex Sans  prose, labels and stamps (the uppercase legends that used to be
+                   a condensed cut; Plex takes the same role at 600 with tracking)
+    IBM Plex Mono  every number, in tabular figures, so a column reads as a scale
+    Instrument Serif italic  the voice: the wordmark and page titles, nowhere else
+
+  Both text faces ship 400/500/600/700 so `font-semibold` and `font-bold` on a
+  figure are the real cut, not a synthesised smear over the 400.
 */
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("/fonts/ibm-plex-sans-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("/fonts/ibm-plex-sans-500.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("/fonts/ibm-plex-sans-600.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("/fonts/ibm-plex-sans-700.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/fonts/ibm-plex-mono-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/fonts/ibm-plex-mono-500.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/fonts/ibm-plex-mono-600.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/fonts/ibm-plex-mono-700.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+/* One cut only: italic 400. It is never set bold and never set uppercase, which is
+   why it is reserved for the two places that use it. */
+@font-face {
+  font-family: "Instrument Serif";
+  src: url("/fonts/instrument-serif-italic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
 
 @theme {
   /* The value ladder, darkest to lightest. */
@@ -42,10 +118,15 @@
   --color-sim: #a78bfa;       /* simulated data — violet, never a direction */
   --color-ema9: #22d3ee;      /* the fast EMA line on the execution chart */
 
-  /* Barlow carries the prose; Semi Condensed the legends; Plex Mono the math. */
-  --font-sans: var(--font-barlow), ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
-  --font-display: var(--font-barlow-condensed), var(--font-barlow), ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-plex-mono), ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, monospace;
+  /* Plex Sans carries the prose and the stamps; the serif is the voice, used twice
+     on a page at most. Plex Mono carries the math. `--font-display` is the same
+     family as `--font-sans` — it is the *role* token for uppercase labels, legends
+     and chips, so a component says what the text is for rather than which file it
+     comes from. */
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-display: "IBM Plex Sans", ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-serif: "Instrument Serif", ui-serif, Georgia, "Times New Roman", serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, monospace;
 }
 
 /*
