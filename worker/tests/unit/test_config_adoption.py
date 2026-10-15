@@ -47,6 +47,14 @@ async def test_adopted_config_replaces_env_defaults() -> None:
     assert rt.params.initial_scan_candles == 8
     assert rt.params.universe == "FNO"
     assert rt._config_version == saved.config_version
+    # The saved row carries no MACD columns yet (Phase 2B): adoption supplies
+    # the module defaults and leaves the operator's saved values untouched.
+    assert rt.params.fast_ema_period == 9
+    assert (rt.params.macd_fast_period, rt.params.macd_slow_period, rt.params.macd_signal_period) == (
+        12,
+        26,
+        9,
+    )
 
 
 async def test_missing_row_keeps_env_defaults() -> None:

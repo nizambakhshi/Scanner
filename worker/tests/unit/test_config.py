@@ -134,6 +134,54 @@ def test_defaults_pass_validation_and_are_coerced() -> None:
     assert params.warmup_candles_required == max(params.slow_ema_period, params.volume_lookback)
 
 
+def test_macd_defaults_parsing_and_validation() -> None:
+    defaults = C.ScannerParams.from_env({})
+    assert (defaults.macd_fast_period, defaults.macd_slow_period, defaults.macd_signal_period) == (
+        12,
+        26,
+        9,
+    )
+    parsed = C.ScannerParams.from_env(
+        {"MACD_FAST_PERIOD": "8", "MACD_SLOW_PERIOD": "21", "MACD_SIGNAL_PERIOD": "5"}
+    )
+    assert (parsed.macd_fast_period, parsed.macd_slow_period, parsed.macd_signal_period) == (8, 21, 5)
+    parsed.validate()
+    with pytest.raises(C.ConfigError, match="MACD_FAST_PERIOD must be >= 2"):
+        C.ScannerParams(macd_fast_period=1).validate()
+    with pytest.raises(C.ConfigError, match="MACD_SLOW_PERIOD must be greater"):
+        C.ScannerParams(macd_fast_period=26, macd_slow_period=26).validate()
+    with pytest.raises(C.ConfigError, match="MACD_SIGNAL_PERIOD must be >= 2"):
+        C.ScannerParams(macd_signal_period=1).validate()
+
+
+def test_scanner_config_public_shape_is_unchanged() -> None:
+    # The config snapshot the heartbeat and dashboard consume keeps exactly the
+    # keys it had before Phase 2B: the MACD knobs live on the env side for now
+    # and must not leak into the public shape until the DB columns land.
+    assert set(C.ScannerParams().to_dict()) == {
+        "universe",
+        "fast_ema_period",
+        "slow_ema_period",
+        "volume_lookback",
+        "relative_volume_threshold",
+        "alert_cooldown_minutes",
+        "removal_confirm_candles",
+        "feed_staleness_threshold_seconds",
+        "candle_grace_seconds",
+        "initial_scan_candles",
+        "max_subscribed_instruments",
+        "rank_weights",
+        "is_enabled",
+        "config_version",
+    }
+    assert set(C.ScannerParams().to_dict()["rank_weights"]) == {
+        "price_strength",
+        "relative_volume",
+        "vwap_strength",
+        "ema_spread",
+    }
+
+
 # ── angel / telegram / simulation sub-configs ─────────────────────────────
 
 

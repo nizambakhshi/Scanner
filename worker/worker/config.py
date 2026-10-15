@@ -22,6 +22,9 @@ from pathlib import Path
 DEFAULTS_ENV_KEYS = (
     "FAST_EMA_PERIOD",
     "SLOW_EMA_PERIOD",
+    "MACD_FAST_PERIOD",
+    "MACD_SLOW_PERIOD",
+    "MACD_SIGNAL_PERIOD",
     "VOLUME_LOOKBACK",
     "RELATIVE_VOLUME_THRESHOLD",
     "ALERT_COOLDOWN_MINUTES",
@@ -106,6 +109,14 @@ class ScannerParams:
     universe: str = "NIFTY500"
     fast_ema_period: int = 9
     slow_ema_period: int = 20
+    # MACD(12, 26, 9) for the intraday engine, on the same five-minute closes
+    # as the RSI-5m. Defaults follow the classic definition. These knobs are
+    # env/configurable now; the saved ``scanner_configs`` rows carry no MACD
+    # columns yet, so a row adopted from the dashboard supplies the defaults
+    # until the schema change that accompanies MACD-based detection lands.
+    macd_fast_period: int = 12
+    macd_slow_period: int = 26
+    macd_signal_period: int = 9
     volume_lookback: int = 20
     relative_volume_threshold: float = 1.5
     alert_cooldown_minutes: int = 15
@@ -127,6 +138,9 @@ class ScannerParams:
             universe=(_get(raw, "UNIVERSE") or "NIFTY500").upper(),
             fast_ema_period=_int(raw, "FAST_EMA_PERIOD", 9),
             slow_ema_period=_int(raw, "SLOW_EMA_PERIOD", 20),
+            macd_fast_period=_int(raw, "MACD_FAST_PERIOD", 12),
+            macd_slow_period=_int(raw, "MACD_SLOW_PERIOD", 26),
+            macd_signal_period=_int(raw, "MACD_SIGNAL_PERIOD", 9),
             volume_lookback=_int(raw, "VOLUME_LOOKBACK", 20),
             relative_volume_threshold=_float(raw, "RELATIVE_VOLUME_THRESHOLD", 1.5),
             alert_cooldown_minutes=_int(raw, "ALERT_COOLDOWN_MINUTES", 15),
@@ -150,6 +164,12 @@ class ScannerParams:
             errors.append("FAST_EMA_PERIOD must be >= 2")
         if self.slow_ema_period <= self.fast_ema_period:
             errors.append("SLOW_EMA_PERIOD must be greater than FAST_EMA_PERIOD")
+        if self.macd_fast_period < 2:
+            errors.append("MACD_FAST_PERIOD must be >= 2")
+        if self.macd_slow_period <= self.macd_fast_period:
+            errors.append("MACD_SLOW_PERIOD must be greater than MACD_FAST_PERIOD")
+        if self.macd_signal_period < 2:
+            errors.append("MACD_SIGNAL_PERIOD must be >= 2")
         if self.volume_lookback < 2:
             errors.append("VOLUME_LOOKBACK must be >= 2")
         if self.relative_volume_threshold <= 0:

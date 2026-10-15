@@ -6,11 +6,14 @@ implementation, so a formula change cannot quietly rewrite the truth.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pytest
 
 from worker.analytics.indicators import (
     EmaState,
     IndicatorRegistry,
+    IndicatorValues,
     InstrumentIndicators,
     RelativeVolumeState,
     VwapState,
@@ -100,6 +103,44 @@ def test_ema_warm_flag_only_after_seed():
     for close in (11, 12, 13):
         ema.update(close)
     assert ema.warm
+
+
+# ── EMA: the signed mode the MACD signal line needs ─────────────────────────
+
+
+def test_signed_ema_accepts_zero_and_negative_values():
+    ema = EmaState(period=2, require_positive=False)
+    assert ema.update(0.0) is None
+    assert ema.update(-4.0) == pytest.approx(-2.0)  # SMA(0, −4)
+    # α=2/3: 2/3·(−6) + 1/3·(−2) = −14/3
+    assert ema.update(-6.0) == pytest.approx(-14 / 3)
+    with pytest.raises(ValueError):
+        ema.update(float("nan"))
+    with pytest.raises(ValueError):
+        ema.update(float("inf"))
+
+
+def test_signed_ema_at_exact_zero_uses_the_real_zero():
+    # The truthiness trap: a signed EMA sitting at exactly 0.0 must recurse
+    # from 0.0, not from the incoming value — `value or close` would pick the
+    # close and corrupt the recursion (price EMAs can never reach 0.0, so this
+    # branch only exists for the MACD signal line).
+    ema = EmaState(period=2, require_positive=False)
+    ema.update(0.0)
+    ema.update(0.0)  # value is now exactly 0.0
+    # 2/3·10 + 1/3·0 = 20/3 (with the trap this would read 10.0)
+    assert ema.update(10.0) == pytest.approx(20 / 3)
+
+
+def test_ema_require_positive_flag_round_trips_and_defaults_to_price_mode():
+    signed = EmaState(period=2, require_positive=False)
+    signed.update(0.0)
+    restored = EmaState.from_dict(signed.to_dict())
+    assert restored.require_positive is False
+    restored.update(-1.0)  # signed mode survived the checkpoint
+    legacy = dict(signed.to_dict())
+    del legacy["require_positive"]
+    assert EmaState.from_dict(legacy).require_positive is True  # pre-flag checkpoints
 
 
 # ── relative volume ─────────────────────────────────────────────────────────
@@ -209,3 +250,233 @@ def test_reset_session_vwap_keeps_ema_and_volume_history():
     assert engine.vwap.value is None
     assert engine.fast.value == before_fast
     assert engine.volume.ready
+
+
+# ── MACD inside the instrument engine (Phase 2B) ────────────────────────────
+
+SESSION_OPEN = datetime(2026, 10, 15, 9, 15)
+
+
+def macd_engine() -> InstrumentIndicators:
+    """Small periods so the MACD is warm within a handful of buckets."""
+    return InstrumentIndicators(
+        fast_period=3,
+        slow_period=5,
+        volume_lookback=3,
+        rsi_period=3,
+        macd_fast_period=2,
+        macd_slow_period=3,
+        macd_signal_period=2,
+    )
+
+
+def feed_session(engine: InstrumentIndicators, minutes: range, *, start: float = 100.0) -> None:
+    for minute in minutes:
+        close = start + minute
+        engine.on_candle(
+            high=close + 1,
+            low=close - 1,
+            close=close,
+            volume=1000 + minute,
+            candle_start=SESSION_OPEN + timedelta(minutes=minute),
+        )
+
+
+def test_macd_and_rsi_advance_on_the_same_bucket_closes():
+    # One partition, not two: both readings move on exactly the candles whose
+    # start is the fifth minute of a bucket (09:19, 09:24, …) and on no others.
+    engine = macd_engine()
+    feed_session(engine, range(20))
+    assert engine.rsi.observations == 4
+    assert engine.macd.observations == 4
+    assert engine.macd.current.ready  # slows 3 + signal 2 − 1 = 4 buckets
+
+
+def test_macd_never_advances_on_a_minute_inside_the_bucket():
+    engine = macd_engine()
+    feed_session(engine, range(4))  # 09:15–09:18: four minutes, no bucket close
+    assert engine.macd.observations == 0
+    assert engine.rsi.observations == 0
+    assert engine.values(close=104.0).macd is None
+    engine.on_candle(
+        high=105,
+        low=104,
+        close=104.0,
+        volume=1100,
+        candle_start=SESSION_OPEN + timedelta(minutes=4),  # 09:19 closes the bucket
+    )
+    assert engine.macd.observations == 1
+
+
+def test_a_bucket_whose_closing_minute_never_arrived_is_absent_not_filled():
+    # The feed lost 09:24 exactly: the 09:15–09:20 and 09:25–09:30 buckets close
+    # normally, the middle one simply never happens — no interpolation, and the
+    # observation count follows the tape rather than the wall clock.
+    gapped = macd_engine()
+    for minute in range(15):
+        if minute == 9:  # the candle that would have closed the 09:20–09:25 bucket
+            continue
+        close = 100.0 + minute
+        gapped.on_candle(
+            high=close + 1,
+            low=close - 1,
+            close=close,
+            volume=1000 + minute,
+            candle_start=SESSION_OPEN + timedelta(minutes=minute),
+        )
+    assert gapped.macd.observations == 2  # 09:19 and 09:29 only
+    assert gapped.rsi.observations == 2
+
+
+def test_session_reset_clears_rsi_and_macd_but_keeps_ema_and_volume():
+    engine = macd_engine()
+    feed_session(engine, range(20))
+    assert engine.rsi.value is not None
+    assert engine.macd.current.ready
+    before_fast = engine.fast.value
+    before_slow = engine.slow.value
+
+    engine.reset_session_vwap()
+
+    assert engine.vwap.value is None
+    assert engine.rsi.value is None and engine.rsi.observations == 0
+    assert engine.macd.observations == 0
+    assert engine.macd.current.macd is None and engine.macd.current.signal is None
+    assert engine.macd.current.ready is False
+    assert engine.fast.value == before_fast
+    assert engine.slow.value == before_slow
+    assert engine.volume.ready
+    # …and it re-warms from the next session's own buckets.
+    feed_session(engine, range(20), start=200.0)
+    assert engine.macd.observations == 4
+    assert engine.macd.current.ready
+
+
+def test_engine_checkpoint_roundtrip_includes_macd():
+    engine = macd_engine()
+    feed_session(engine, range(20))
+    restored = InstrumentIndicators.from_dict(engine.to_dict())
+    for minute in range(20, 30):  # 09:35 onwards: two more bucket closes (…:39, …:44)
+        close = 100.0 + minute
+        live = engine.on_candle(
+            high=close + 1,
+            low=close - 1,
+            close=close,
+            volume=1000 + minute,
+            candle_start=SESSION_OPEN + timedelta(minutes=minute),
+        )
+        replayed = restored.on_candle(
+            high=close + 1,
+            low=close - 1,
+            close=close,
+            volume=1000 + minute,
+            candle_start=SESSION_OPEN + timedelta(minutes=minute),
+        )
+    assert replayed.macd == pytest.approx(live.macd)
+    assert replayed.macd_signal == pytest.approx(live.macd_signal)
+    assert replayed.macd_histogram == pytest.approx(live.macd_histogram)
+
+
+def test_legacy_checkpoint_without_macd_restores_fresh():
+    engine = macd_engine()
+    feed_session(engine, range(20))
+    payload = engine.to_dict()
+    del payload["macd"]  # as written by any pre-Phase-2B checkpoint
+    restored = InstrumentIndicators.from_dict(payload)
+    assert restored.macd.observations == 0
+    assert restored.macd.current.macd is None
+    assert restored.macd.fast_period == 12  # module defaults
+    # The state that existed before the MACD came back untouched.
+    assert restored.rsi.value == pytest.approx(engine.rsi.value)
+    assert restored.vwap.value == pytest.approx(engine.vwap.value)
+    assert restored.fast.value == pytest.approx(engine.fast.value)
+
+
+def test_registry_carries_macd_periods_and_serializes():
+    registry = IndicatorRegistry(
+        fast_period=3,
+        slow_period=5,
+        volume_lookback=3,
+        macd_fast_period=5,
+        macd_slow_period=9,
+        macd_signal_period=4,
+    )
+    engine = registry.get(7)
+    assert (engine.macd.fast_period, engine.macd.slow_period, engine.macd.signal_period) == (5, 9, 4)
+    engine.on_candle(high=101, low=99, close=100, volume=10)
+
+    restored = IndicatorRegistry.from_dict(registry.to_dict())
+    assert restored.get(7).macd.fast_period == 5  # existing state kept its periods
+    newly = restored.get(8)  # engines built after the restore use registry periods
+    assert (newly.macd.fast_period, newly.macd.slow_period, newly.macd.signal_period) == (5, 9, 4)
+
+
+def test_legacy_registry_checkpoint_without_macd_keys():
+    registry = IndicatorRegistry(fast_period=3, slow_period=5, volume_lookback=3)
+    registry.get(1).on_candle(high=101, low=99, close=100, volume=10)
+    payload = registry.to_dict()
+    for key in ("macd_fast_period", "macd_slow_period", "macd_signal_period"):
+        del payload[key]
+    payload["instruments"]["1"].pop("macd")
+    restored = IndicatorRegistry.from_dict(payload)
+    engine = restored.get(1)
+    assert engine.macd.fast_period == 12  # defaults, not a crash
+    assert engine.macd.observations == 0
+    assert engine.candles_seen == 1  # the rest of the checkpoint came back
+
+
+def test_indicator_values_keep_the_pre_macd_constructor_shape():
+    # Callers that build IndicatorValues by hand (tests, tools) must keep
+    # working unchanged: every MACD field is optional and reads as absent.
+    values = IndicatorValues(
+        close=100.0,
+        vwap=None,
+        ema_fast=None,
+        ema_slow=None,
+        average_volume=None,
+        relative_volume=None,
+        candles_seen=0,
+        warm=False,
+    )
+    assert (values.macd, values.macd_signal, values.macd_histogram) == (None, None, None)
+
+
+def test_indicator_values_regression_pin_from_before_the_macd_phase():
+    """The exact values the engine produced *before* the MACD foundation landed.
+
+    Captured from the pre-change implementation (2026-10-15) over a deterministic
+    80-candle session. This pin exists to prove the MACD work changed none of the
+    numbers the scanner, watchlist, alerts and dashboard already rely on — and
+    that the new fields correctly read as absent while their warm-up is short.
+    """
+    engine = InstrumentIndicators(fast_period=9, slow_period=20, volume_lookback=20)
+    mid = end = None
+    for index in range(80):
+        close = 100.0 + ((index * 7) % 19) - 9
+        values = engine.on_candle(
+            high=close + 0.5,
+            low=close - 0.5,
+            close=close,
+            volume=1000 + (index * 13) % 97,
+            candle_start=SESSION_OPEN + timedelta(minutes=index),
+        )
+        if index == 39:
+            mid = values
+        if index == 79:
+            end = values
+    assert mid is not None and end is not None
+    assert mid.vwap == pytest.approx(99.73745155270588, rel=1e-12)
+    assert mid.ema_fast == pytest.approx(98.69540366717939, rel=1e-12)
+    assert mid.ema_slow == pytest.approx(99.42567493049877, rel=1e-12)
+    assert mid.average_volume == pytest.approx(1050.4, rel=1e-12)
+    assert mid.relative_volume == pytest.approx(0.9729626808834729, rel=1e-12)
+    assert mid.rsi_5m is None and mid.warm is True
+    assert end.vwap == pytest.approx(99.8458589598137, rel=1e-12)
+    assert end.ema_fast == pytest.approx(98.56615270869261, rel=1e-12)
+    assert end.ema_slow == pytest.approx(99.29730594429992, rel=1e-12)
+    assert end.average_volume == pytest.approx(1046.6, rel=1e-12)
+    assert end.relative_volume == pytest.approx(1.0099369386585133, rel=1e-12)
+    assert end.rsi_5m == pytest.approx(44.92440604751619, rel=1e-12)
+    # 16 buckets have completed; the default MACD needs 26 — absent, not zero.
+    assert mid.macd is None and end.macd is None
+    assert end.macd_signal is None and end.macd_histogram is None

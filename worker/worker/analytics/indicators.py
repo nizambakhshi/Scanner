@@ -1,4 +1,4 @@
-"""Indicator engine: session VWAP, EMA(fast/slow), relative volume, 5-minute RSI (spec §9).
+"""Indicator engine: session VWAP, EMA(fast/slow), relative volume, 5-minute RSI, MACD.
 
 Every calculation here is deterministic and pure: the same candle sequence
 produces the same numbers regardless of process restarts, worker count, or
@@ -6,15 +6,16 @@ wall-clock time. Each definition matches the formula written in the master spec,
 and the unit tests in ``tests/unit/test_indicators.py`` assert against
 independently hand-computed values rather than against this code's own output.
 
-EMA initialization convention (used identically by warm-up, live processing,
-restart recovery and the tests): the first ``n`` valid closes form a simple
-moving average, that SMA becomes ``EMA_n``, and every later close uses the
-recursive form ``EMA_t = α·C_t + (1−α)·EMA_{t−1}`` with ``α = 2/(n+1)``.
+The EMA initialization convention (SMA seed, then ``α = 2/(n+1)`` recursion)
+lives with the engine itself in :mod:`worker.analytics.ema` and is shared by
+every smoother — the fast/slow EMAs here and the MACD signal line alike.
+``EmaState`` is re-exported from this module for callers that have always
+imported it here.
 
-The RSI-14 is measured on **today's five-minute closes only** — the last 1-minute
-close of each bucket, the same partition the /strategy board builds in SQL — and
-is deliberately not seeded from yesterday's tape. An intraday entry rule has to
-describe the move that is happening now.
+The RSI-14 and the MACD are measured on **today's five-minute closes only** —
+the last 1-minute close of each bucket, the same partition the /strategy board
+builds in SQL — and neither is deliberately seeded from yesterday's tape. An
+intraday reading has to describe the move that is happening now.
 """
 
 from __future__ import annotations
@@ -25,57 +26,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from .ema import EmaState
+from .macd import DEFAULT_FAST_PERIOD, DEFAULT_SIGNAL_PERIOD, DEFAULT_SLOW_PERIOD, MacdState
 from .rsi import RSI_PERIOD, WilderRsi, closes_bucket
-
-
-@dataclass
-class EmaState:
-    """Streaming EMA with SMA seed (documented convention above)."""
-
-    period: int
-    alpha: float = field(init=False)
-    value: float | None = None
-    initialized: bool = False
-    _seed: list[float] = field(default_factory=list, repr=False)
-
-    def __post_init__(self) -> None:
-        if self.period < 2:
-            raise ValueError("EMA period must be >= 2")
-        self.alpha = 2.0 / (self.period + 1.0)
-
-    @property
-    def warm(self) -> bool:
-        return self.initialized
-
-    def update(self, close: float) -> float | None:
-        if close is None or close <= 0:
-            raise ValueError(f"EMA close price must be positive, got {close}")
-        if not self.initialized:
-            self._seed.append(close)
-            if len(self._seed) < self.period:
-                return None
-            self.value = sum(self._seed) / self.period
-            self.initialized = True
-            self._seed = []
-            return self.value
-        self.value = self.alpha * close + (1.0 - self.alpha) * (self.value or close)
-        return self.value
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "period": self.period,
-            "value": self.value,
-            "initialized": self.initialized,
-            "seed": list(self._seed),
-        }
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> EmaState:
-        state = cls(period=int(payload["period"]))
-        state.value = None if payload.get("value") is None else float(payload["value"])
-        state.initialized = bool(payload.get("initialized"))
-        state._seed = [float(v) for v in payload.get("seed", [])]
-        return state
 
 
 @dataclass
@@ -198,6 +151,14 @@ class IndicatorValues:
     #: that do not close a bucket — the reading is a bucket measurement, not a
     #: per-minute one.
     rsi_5m: float | None = None
+    #: MACD(12,26,9) on the same five-minute closes as ``rsi_5m`` (same bucket
+    #: boundary, same session scope — see :mod:`worker.analytics.macd`). The
+    #: line first exists on the 26th bucket and the signal/histogram on the
+    #: 34th; each stays ``None`` until its stage has the history it needs.
+    #: Nothing consumes these yet (Phase 2B: foundation only — no alert gate).
+    macd: float | None = None
+    macd_signal: float | None = None
+    macd_histogram: float | None = None
 
 
 class InstrumentIndicators:
@@ -210,6 +171,9 @@ class InstrumentIndicators:
         slow_period: int,
         volume_lookback: int,
         rsi_period: int = RSI_PERIOD,
+        macd_fast_period: int = DEFAULT_FAST_PERIOD,
+        macd_slow_period: int = DEFAULT_SLOW_PERIOD,
+        macd_signal_period: int = DEFAULT_SIGNAL_PERIOD,
     ) -> None:
         if slow_period <= fast_period:
             raise ValueError("slow EMA period must exceed fast EMA period")
@@ -218,6 +182,11 @@ class InstrumentIndicators:
         self.vwap = VwapState()
         self.volume = RelativeVolumeState(lookback=volume_lookback)
         self.rsi = WilderRsi(period=rsi_period)
+        self.macd = MacdState(
+            fast_period=macd_fast_period,
+            slow_period=macd_slow_period,
+            signal_period=macd_signal_period,
+        )
         self.candles_seen = 0
         self.fast_period = fast_period
         self.slow_period = slow_period
@@ -242,9 +211,9 @@ class InstrumentIndicators:
         the move happening now.
 
         ``candle_start`` is what tells a five-minute bucket close from the four
-        minutes inside it. Omit it and the RSI simply stops advancing (EMA, VWAP
-        and volume still update), which keeps an older caller honest rather than
-        silently bucketing on the wrong minute.
+        minutes inside it. Omit it and the RSI and MACD simply stop advancing
+        (EMA, VWAP and volume still update), which keeps an older caller honest
+        rather than silently bucketing on the wrong minute.
         """
         if close <= 0:
             raise ValueError(f"candle close must be positive, got {close}")
@@ -254,6 +223,9 @@ class InstrumentIndicators:
             self.vwap.update(high, low, close, volume)
             if candle_start is not None and closes_bucket(candle_start):
                 self.rsi.update(close)
+                # Same candle, same boundary: the MACD and the RSI-5m share one
+                # partition by construction, not by two matching definitions.
+                self.macd.update(close)
         self.fast.update(close)
         self.slow.update(close)
         self.volume.push(volume)
@@ -277,16 +249,25 @@ class InstrumentIndicators:
             candles_seen=self.candles_seen,
             warm=warm,
             rsi_5m=self.rsi.value,
+            macd=self.macd.current.macd,
+            macd_signal=self.macd.current.signal,
+            macd_histogram=self.macd.current.histogram,
         )
 
     def reset_session_vwap(self) -> None:
         """Called at each session boundary; EMA/volume history is preserved.
 
-        The five-minute RSI resets with the VWAP rather than with the EMA: both
-        measure *this* session, and yesterday's tape is not today's dip.
+        The five-minute RSI and the MACD reset with the VWAP rather than with
+        the EMA: all three measure *this* session, and yesterday's tape is not
+        today's dip.
         """
         self.vwap.reset()
         self.rsi = WilderRsi(period=self.rsi.period)
+        self.macd = MacdState(
+            fast_period=self.macd.fast_period,
+            slow_period=self.macd.slow_period,
+            signal_period=self.macd.signal_period,
+        )
 
     # ── warm-up + recovery ──────────────────────────────────────────────────
     def seed(self, candles: Iterable[Any], *, session_candles: bool = False) -> int:
@@ -319,6 +300,7 @@ class InstrumentIndicators:
             "vwap": self.vwap.to_dict(),
             "volume": self.volume.to_dict(),
             "rsi": self.rsi.to_dict(),
+            "macd": self.macd.to_dict(),
             "candles_seen": self.candles_seen,
         }
 
@@ -334,6 +316,10 @@ class InstrumentIndicators:
         engine.vwap = VwapState.from_dict(payload["vwap"])
         if payload.get("rsi"):
             engine.rsi = WilderRsi.from_dict(payload["rsi"])
+        if payload.get("macd"):
+            # Absent on checkpoints written before the MACD existed: those
+            # restore with a fresh state rather than a guessed history.
+            engine.macd = MacdState.from_dict(payload["macd"])
         for volume in payload["volume"].get("history", []):
             engine.volume.push(int(volume))
         engine.candles_seen = int(payload.get("candles_seen", 0))
@@ -343,10 +329,22 @@ class InstrumentIndicators:
 class IndicatorRegistry:
     """Owns one :class:`InstrumentIndicators` per instrument."""
 
-    def __init__(self, *, fast_period: int, slow_period: int, volume_lookback: int) -> None:
+    def __init__(
+        self,
+        *,
+        fast_period: int,
+        slow_period: int,
+        volume_lookback: int,
+        macd_fast_period: int = DEFAULT_FAST_PERIOD,
+        macd_slow_period: int = DEFAULT_SLOW_PERIOD,
+        macd_signal_period: int = DEFAULT_SIGNAL_PERIOD,
+    ) -> None:
         self.fast_period = fast_period
         self.slow_period = slow_period
         self.volume_lookback = volume_lookback
+        self.macd_fast_period = macd_fast_period
+        self.macd_slow_period = macd_slow_period
+        self.macd_signal_period = macd_signal_period
         self._engines: dict[int, InstrumentIndicators] = {}
 
     def get(self, instrument_id: int) -> InstrumentIndicators:
@@ -356,6 +354,9 @@ class IndicatorRegistry:
                 fast_period=self.fast_period,
                 slow_period=self.slow_period,
                 volume_lookback=self.volume_lookback,
+                macd_fast_period=self.macd_fast_period,
+                macd_slow_period=self.macd_slow_period,
+                macd_signal_period=self.macd_signal_period,
             )
             self._engines[instrument_id] = engine
         return engine
@@ -372,6 +373,9 @@ class IndicatorRegistry:
             "fast_period": self.fast_period,
             "slow_period": self.slow_period,
             "volume_lookback": self.volume_lookback,
+            "macd_fast_period": self.macd_fast_period,
+            "macd_slow_period": self.macd_slow_period,
+            "macd_signal_period": self.macd_signal_period,
             "instruments": {str(key): value.to_dict() for key, value in self._engines.items()},
         }
 
@@ -381,6 +385,11 @@ class IndicatorRegistry:
             fast_period=int(payload["fast_period"]),
             slow_period=int(payload["slow_period"]),
             volume_lookback=int(payload["volume_lookback"]),
+            # Absent on checkpoints written before the MACD existed; the
+            # per-instrument payloads carry their own MACD state in that case.
+            macd_fast_period=int(payload.get("macd_fast_period", DEFAULT_FAST_PERIOD)),
+            macd_slow_period=int(payload.get("macd_slow_period", DEFAULT_SLOW_PERIOD)),
+            macd_signal_period=int(payload.get("macd_signal_period", DEFAULT_SIGNAL_PERIOD)),
         )
         for key, value in payload.get("instruments", {}).items():
             registry._engines[int(key)] = InstrumentIndicators.from_dict(value)
