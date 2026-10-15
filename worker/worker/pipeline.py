@@ -22,11 +22,14 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from .alerts import AlertEngine
-from .analytics.antichase import AntiChasePolicy, MarketContext
+from .analytics.antichase import AntiChasePolicy, AntiChaseReport, MarketContext
 from .analytics.breakouts import BreakoutEvent, BreakoutTracker, StrategiesConfig
-from .analytics.indicators import IndicatorRegistry
+from .analytics.extension import ExtensionClassifier, ExtensionMeasures
+from .analytics.indicators import IndicatorRegistry, IndicatorValues
 from .analytics.levels import LevelBook
+from .analytics.readiness import READINESS_ENTRY_READY, ReadinessInputs, classify_readiness
 from .analytics.scanner import ScanContext, Scanner
+from .analytics.score import ScoreInputs, compute_score
 from .analytics.setups import ReclaimCandidate, RetestCandidate, SetupTracker
 from .config import ScannerParams
 from .logging_setup import get_logger
@@ -94,6 +97,17 @@ class PipelineCounters:
     #: evidence that silence cannot give, and it turns nonzero the moment a limit
     #: is configured and a chase walks into it.
     antichase_blocked: int = 0
+    #: Candidates that went through the Stage 2/3 observation ensemble (the
+    #: audit's Phase B): extension verdict, readiness state, §6 score — measured
+    #: and logged, never alerted and never persisted until their phases land.
+    candidates_judged: int = 0
+    #: Candidates the readiness machine would call ENTRY READY. The number the
+    #: alert phase will read: zero alerts is not the same as zero readiness.
+    entry_ready_detected: int = 0
+    #: Candidates the extension classifier measured at or beyond an armed
+    #: limit — zero under the shipped defaults, and honest evidence the moment
+    #: an operator document arms one.
+    extension_extended_detected: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -109,6 +123,9 @@ class PipelineCounters:
             "retests_detected": self.retests_detected,
             "reclaims_detected": self.reclaims_detected,
             "antichase_blocked": self.antichase_blocked,
+            "candidates_judged": self.candidates_judged,
+            "entry_ready_detected": self.entry_ready_detected,
+            "extension_extended_detected": self.extension_extended_detected,
         }
 
 
@@ -147,6 +164,12 @@ class ScannerPipeline:
     #: operator's limits exist (audit D7): with no limits configured every gate
     #: reports ``skip``, every candidate clears, and the verdicts go to the log.
     antichase: AntiChasePolicy | None = field(default=None, repr=False)
+    #: The Stage 2/3 observation ensemble (the audit's Phase B): the four-way
+    #: chase classifier — every limit unset, so it measures without judging —
+    #: feeding the readiness machine and the §6 score. Judged per candidate and
+    #: read by the log and the counters only; alerts and persistence wait for
+    #: their own phases.
+    extension: ExtensionClassifier | None = field(default=None, repr=False)
     #: Per-instrument level inventories (worker.analytics.levels) — a pure fold of
     #: today's trustworthy candles. The first consumer is the anti-chase
     #: resistance gate; a restart rebuilds them by replay, like the ATR.
@@ -155,6 +178,9 @@ class ScannerPipeline:
     _last_tick_at: dict[int, datetime] = field(default_factory=dict, repr=False)
     _last_exchange_ts: dict[int, datetime] = field(default_factory=dict, repr=False)
     _session_candle_count: dict[int, int] = field(default_factory=dict, repr=False)
+    _session_first_candle: dict[int, tuple[float, float]] = field(
+        default_factory=dict, repr=False
+    )
     _session_high: dict[int, float] = field(default_factory=dict, repr=False)
     _session_low: dict[int, float] = field(default_factory=dict, repr=False)
     _latest_snapshot: dict[int, tuple[Candle, IndicatorSnapshot, bool, bool, tuple[str, ...]]] = (
@@ -170,6 +196,7 @@ class ScannerPipeline:
         self.breakouts = BreakoutTracker(strategies=self.strategies, window=self.window)
         self.setups = SetupTracker()
         self.antichase = AntiChasePolicy()
+        self.extension = self.extension or ExtensionClassifier()
         for instrument in self.instruments.values():
             if instrument.instrument_token:
                 self._token_index[instrument.instrument_token] = instrument.id
@@ -382,6 +409,11 @@ class ScannerPipeline:
         if in_session:
             count = self._session_candle_count.get(candle.instrument_id, 0) + 1
             self._session_candle_count[candle.instrument_id] = count
+            if candle.instrument_id not in self._session_first_candle:
+                # The session's opening print and first close — raw facts the
+                # extension measures derive the gap and the change-from-open
+                # from, recorded once and never revised.
+                self._session_first_candle[candle.instrument_id] = (candle.open, candle.close)
             if self._last_completed_candle_at is None or (
                 candle.candle_start > self._last_completed_candle_at
             ):
@@ -464,6 +496,14 @@ class ScannerPipeline:
                         **report.to_log_dict(),
                         candle_start=candle.candle_start.isoformat(),
                     )
+                    self._observe_candidate(
+                        candidate,
+                        policy_report=report,
+                        instrument=instrument,
+                        candle=candle,
+                        values=values,
+                        bullish=result.bullish,
+                    )
         snapshot = result.to_snapshot(
             trading_date=self.window.trading_date,
             config_version=self.params.config_version,
@@ -536,6 +576,104 @@ class ScannerPipeline:
             orb_low=None if orb is None else orb[1],
             levels=levels,
         )
+
+    def _observe_candidate(
+        self,
+        candidate: RetestCandidate | ReclaimCandidate,
+        *,
+        policy_report: AntiChaseReport,
+        instrument: Instrument,
+        candle: Candle,
+        values: IndicatorValues,
+        bullish: bool,
+    ) -> None:
+        """The audit Phase B ensemble: measure the chase, name the state, score it.
+
+        Observation only — counters and one log line per candidate, exactly like
+        ``retests_detected`` before it: no alert and no row (the alert edits wait
+        for their phase, the persistence for migration 0012's approval). Every
+        input is a fact some other module already produced — the policy report
+        from the gates above, the extension class from the classifier, the
+        level's presence from the candidate itself — so nothing here re-derives
+        a verdict it was handed.
+        """
+        first_candle = self._session_first_candle.get(candidate.instrument_id)
+        orb = self.breakouts.orb_range(candidate.instrument_id)
+        verdict = self.extension.classify(
+            ExtensionMeasures(
+                completed_candles=self._session_candle_count.get(candidate.instrument_id, 0),
+                price=candle.close,
+                previous_close=instrument.previous_close,
+                session_open=None if first_candle is None else first_candle[0],
+                first_candle_close=None if first_candle is None else first_candle[1],
+                vwap=values.vwap,
+                fast_ema=values.ema_fast,
+                atr=values.atr,
+                orb_high=None if orb is None else orb[0],
+                # The gate verdicts are the caller-merged hard blocks, as the
+                # classifier's contract states: only this layer holds them.
+                hard_block_reasons=() if policy_report.cleared else policy_report.reasons(),
+            )
+        )
+        readiness = classify_readiness(
+            ReadinessInputs(
+                setup_trigger_confirmed=True,
+                mandatory_cleared=bullish and policy_report.cleared,
+                extension_class=verdict.classification,
+                invalidation_level=self._invalidation_level(candidate),
+            )
+        )
+        fast_above_slow = None
+        if values.ema_fast is not None and values.ema_slow is not None:
+            fast_above_slow = values.ema_fast > values.ema_slow
+        score = compute_score(
+            ScoreInputs(
+                # daily_trend_class and liquidity_class stay None until Stage 1
+                # snapshots feed the pipeline; completeness reports the gap.
+                fast_above_slow=fast_above_slow,
+                price=candle.close,
+                vwap=values.vwap,
+                atr=values.atr,
+                rvol=values.relative_volume,
+                rvol_threshold=self.params.relative_volume_threshold,
+                rsi_5m=values.rsi_5m,
+                macd_histogram=values.macd_histogram,
+                structure_evidence=(self._structure_id(candidate),),
+                extension_class=verdict.classification,
+            )
+        )
+        self.counters.candidates_judged += 1
+        if verdict.extended:
+            self.counters.extension_extended_detected += 1
+        if readiness.state == READINESS_ENTRY_READY:
+            self.counters.entry_ready_detected += 1
+        log.info(
+            "candidate_judgement",
+            symbol=candidate.symbol,
+            candle_start=candle.candle_start.isoformat(),
+            extension=verdict.to_log_dict(),
+            readiness=readiness.to_log_dict(),
+            score=score.to_dict(),
+        )
+
+    @staticmethod
+    def _invalidation_level(candidate: RetestCandidate | ReclaimCandidate) -> float | None:
+        """The candidate's own risk line: a reclaim's dip low, a retest's low.
+
+        The brief asks whether a *reliable* invalidation level exists; the
+        candidate carries the one its pattern produced, and the readiness
+        machine treats its absence as an incomplete risk block rather than
+        inventing a stop.
+        """
+        if isinstance(candidate, ReclaimCandidate):
+            return candidate.dip_low
+        return candidate.min_low
+
+    @staticmethod
+    def _structure_id(candidate: RetestCandidate | ReclaimCandidate) -> str:
+        if isinstance(candidate, ReclaimCandidate):
+            return "vwap_reclaim"
+        return "orb_retest"
 
     async def _raise_breakouts(
         self, events: list[BreakoutEvent], *, instrument: Instrument

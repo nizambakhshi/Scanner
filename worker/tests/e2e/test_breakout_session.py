@@ -281,6 +281,16 @@ async def test_the_orb_retest_watch_rides_the_pipeline_and_stays_silent():
     await s.run_minutes(2)  # minutes 11 and 12: the touch, then the reclaim
 
     assert s.pipeline.counters.retests_detected == 1
+    assert s.pipeline.counters.candidates_judged == 1, (
+        "the candidate reached the Phase B ensemble — measured, named, scored"
+    )
+    assert s.pipeline.counters.extension_extended_detected == 0, (
+        "no limit is armed: nothing to be extended against"
+    )
+    assert s.pipeline.counters.entry_ready_detected == 0, (
+        "the baseline cannot clear on a 13-candle tape (EMA20 is not even seeded), "
+        "so the readiness machine reads the floor — observation, never an alert"
+    )
     assert s.pipeline.setups.open_leg_count == 0, "one leg, one candidate: consumed"
     assert len(s.signals_of(SignalType.BREAKOUT_UP, instrument_id=1)) == 1, (
         "the reclaim is observed, never alerted — no second level-break row"
@@ -305,6 +315,10 @@ async def test_the_vwap_reclaim_becomes_a_candidate_and_the_board_is_untouched()
 
     assert s.pipeline.counters.reclaims_detected == 1
     assert s.pipeline.counters.antichase_blocked == 0, "defaults judge nothing"
+    assert s.pipeline.counters.candidates_judged == 1, "the reclaim reached the ensemble too"
+    assert s.pipeline.counters.entry_ready_detected == 0, (
+        "seven candles: the EMA seed alone rules the baseline out, so the floor it is"
+    )
     assert s.pipeline.setups.dip_for(1) is None, "one dip, one candidate: consumed"
     ups = s.signals_of(SignalType.BREAKOUT_UP, instrument_id=1)
     assert len(ups) == 1, "the vwap_reclaim detector event is the one alert …"
@@ -335,6 +349,11 @@ async def test_a_configured_policy_blocks_the_reclaim_as_evidence_never_suppress
 
     assert s.pipeline.counters.reclaims_detected == 1, "the candidate still happened"
     assert s.pipeline.counters.antichase_blocked == 1
+    assert s.pipeline.counters.candidates_judged == 1
+    assert s.pipeline.counters.entry_ready_detected == 0
+    assert s.pipeline.counters.extension_extended_detected == 0, (
+        "the block is a policy gate — the measure-only classifier has no armed limit"
+    )
     ups = s.signals_of(SignalType.BREAKOUT_UP, instrument_id=1)
     assert len(ups) == 1, "a blocked candidate is evidence, not a suppressed alert"
     assert s.pipeline.counters.breakouts_detected == 1
