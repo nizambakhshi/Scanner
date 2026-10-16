@@ -44,3 +44,6 @@ supabase/.temp/
 # leftovers from running install_edge.sh on a dev machine.
 ops/db-edge/certs/
 ops/db-edge/*.local
+
+# ── graphify knowledge graph (local analysis artifact) ─────────────────────
+graphify-out/
