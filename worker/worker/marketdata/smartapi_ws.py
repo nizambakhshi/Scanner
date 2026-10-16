@@ -344,6 +344,14 @@ class SmartApiFeed:
         async with self._connect(self.settings.ws_url, additional_headers=headers) as socket:
             self._socket = socket
             await self.set_status(FeedStatus.CONNECTED, "socket open")
+            # A fresh socket knows nothing: the live token set lives in
+            # ``_subscribed``, and ``_pending`` only holds never-yet-sent tokens.
+            # Fold the former into the latter so a reconnect re-subscribes instead
+            # of staying "connected" and blind.
+            for mode, tokens in self._subscribed.items():
+                if tokens:
+                    self._pending.setdefault(mode, set()).update(tokens)
+            self._subscribed.clear()
             await self.push_subscriptions()
             tasks = [
                 asyncio.create_task(self._receive(socket), name="feed-receive"),
@@ -370,8 +378,8 @@ class SmartApiFeed:
         async for raw in socket:  # type: ignore[union-attr]
             if self._stop.is_set():
                 return
-            self.stats.last_frame_monotonic = self._monotonic()
             if isinstance(raw, (bytes, bytearray)):
+                self.stats.last_frame_monotonic = self._monotonic()
                 self.stats.frames_binary += 1
                 try:
                     packet = decode_packet(bytes(raw))
@@ -384,8 +392,11 @@ class SmartApiFeed:
             self.stats.frames_text += 1
             payload = parse_text_frame(raw)
             if payload is None:  # a bare "pong"
+                # Proves the socket lives, not that market data flows: the
+                # staleness watchdog must not read heartbeats as feed frames.
                 self.stats.pongs_received += 1
                 continue
+            self.stats.last_frame_monotonic = self._monotonic()
             if is_subscription_error(payload):
                 self.stats.subscription_errors += 1
                 text = error_text(payload)

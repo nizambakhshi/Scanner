@@ -1624,6 +1624,23 @@ class PostgresStore(ScannerStore):
             row = await (await conn.execute(sql, params)).fetchone()
         return int(row["total"]) if row else 0
 
+    async def requeue_in_flight_deliveries(self) -> int:
+        """Sweep rows a crash left in IN_FLIGHT back into the queue.
+
+        A claim marks IN_FLIGHT and increments the attempt; if the process
+        dies before ``update_delivery`` the row would sit there forever,
+        counted as pending but never retried. Safe only while one sender
+        process runs, which the market-data lease guarantees.
+        """
+        sql = """
+            UPDATE notification_deliveries
+            SET delivery_status = 'QUEUED', next_retry_at = NULL
+            WHERE delivery_status = 'IN_FLIGHT'
+        """
+        async with self._pool.connection() as conn, conn.transaction():
+            result = await conn.execute(sql)
+        return int(result.rowcount or 0)
+
     async def delivery_rollup(self, *, session_id: int) -> dict[str, int]:
         sql = """
             SELECT nd.channel || '_' || nd.delivery_status AS key, COUNT(*)::int AS total

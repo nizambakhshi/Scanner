@@ -621,7 +621,16 @@ class InMemoryStore(ScannerStore):
         claims: list[NotificationClaim] = []
         for row in due[:limit]:
             self.claimed.add(row.id)
-            self.deliveries[row.id] = NotificationDelivery(**{**row.__dict__, "delivery_status": DeliveryStatus.IN_FLIGHT})
+            self.deliveries[row.id] = NotificationDelivery(
+                **{
+                    **row.__dict__,
+                    "delivery_status": DeliveryStatus.IN_FLIGHT,
+                    # Match the Postgres claim: it increments attempt_count in
+                    # the same statement, so claims always carry the count
+                    # *including* the attempt being made now.
+                    "attempt_count": row.attempt_count + 1,
+                }
+            )
             claims.append(NotificationClaim(delivery=self.deliveries[row.id], channel=channel))
         return claims
 
@@ -659,6 +668,17 @@ class InMemoryStore(ScannerStore):
             if row.delivery_status in (DeliveryStatus.QUEUED, DeliveryStatus.FAILED, DeliveryStatus.IN_FLIGHT)
             and (channel is None or row.channel == channel)
         )
+
+    async def requeue_in_flight_deliveries(self) -> int:
+        swept = 0
+        for row in list(self.deliveries.values()):
+            if row.delivery_status is DeliveryStatus.IN_FLIGHT:
+                self.claimed.discard(row.id)
+                self.deliveries[row.id] = NotificationDelivery(
+                    **{**row.__dict__, "delivery_status": DeliveryStatus.QUEUED}
+                )
+                swept += 1
+        return swept
 
     async def delivery_rollup(self, *, session_id: int) -> dict[str, int]:
         signal_ids = {

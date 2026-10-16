@@ -19,8 +19,9 @@ Guarantees this module is responsible for (spec §12.5, §13):
 
 Retry layering is deliberate: the sender retries *inside* one dispatch (429
 ``retry_after``, transport errors) while this loop retries *across* minutes.
-Worst-case provider calls are ``max_attempts ** 2`` spread over an exponential
-schedule, which Telegram's per-minute limits absorb comfortably.
+Worst-case provider calls are ``max_attempts`` dispatches times the sender's
+in-dispatch retries, spread over an exponential schedule, which Telegram's
+per-minute limits absorb comfortably.
 """
 
 from __future__ import annotations
@@ -102,7 +103,9 @@ class Dispatcher:
         self, claim: NotificationClaim, *, now: datetime, report: DispatchReport
     ) -> None:
         delivery = claim.delivery
-        attempt = delivery.attempt_count + 1
+        # The claim already counted this attempt (both stores increment on
+        # claim), so the returned row's count *is* this dispatch's number.
+        attempt = delivery.attempt_count
         text = str(delivery.payload.get("text") or "").strip()
         if not text:
             # A queued row without body text can never be delivered; recording

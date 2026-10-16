@@ -434,6 +434,15 @@ class ScannerStore(ABC):
     async def pending_notification_count(self, *, channel: Channel | None = None) -> int: ...
 
     @abstractmethod
+    async def requeue_in_flight_deliveries(self) -> int:
+        """Requeue rows stranded in IN_FLIGHT (a send interrupted mid-flight).
+
+        Returns the number of rows swept. Called once at boot, while this is
+        the only sender process.
+        """
+        ...
+
+    @abstractmethod
     async def delivery_rollup(self, *, session_id: int) -> dict[str, int]:
         """Delivery counts for one session's signals.
 

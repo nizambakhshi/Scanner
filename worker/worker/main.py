@@ -151,6 +151,15 @@ class WorkerRuntime:
         self.params = self.settings.scanner
         self.telegram = self.settings.telegram
 
+    @property
+    def telegram_active(self) -> bool:
+        """Send-eligibility judged on the ADOPTED credentials, not the environment's.
+
+        ``settings.notifications_enabled`` only sees env keys; a token saved on the
+        dashboard lives in ``self.telegram`` after adoption, and the env can stay empty.
+        """
+        return self.telegram.configured and not self.settings.simulation_label
+
     # ── construction ──────────────────────────────────────────────────────
 
     @classmethod
@@ -176,6 +185,12 @@ class WorkerRuntime:
             )
             await self.store.close()
             return 2
+        # A previous process died between claim and update; those IN_FLIGHT rows
+        # would never be retried. Sweeping at boot is safe because the lease we
+        # just took means this is the only sender.
+        swept = await self.store.requeue_in_flight_deliveries()
+        if swept:
+            log.warning("in_flight_deliveries_requeued", count=swept)
         code = 0
         try:
             while not self.stop.is_set():
@@ -577,9 +592,7 @@ class WorkerRuntime:
         if self._sender is not None:
             self._sender.settings = self.telegram
         if self._alerts is not None:
-            self._alerts.telegram_enabled = bool(
-                self.settings.notifications_enabled and self.telegram.configured
-            )
+            self._alerts.telegram_enabled = self.telegram_active
             self._alerts.telegram_chat_id = self.telegram.chat_id
         # Only the fingerprint travels: a rotated token must be visible in the log
         # without the token ever appearing in it.
@@ -674,7 +687,7 @@ class WorkerRuntime:
         self._alerts = AlertEngine(
             store=self.store,
             params=self.params,
-            telegram_enabled=self.settings.notifications_enabled and telegram.configured,
+            telegram_enabled=self.telegram_active,
             telegram_chat_id=telegram.chat_id,
             app_url=self.settings.app_url,
             simulation=not self.settings.is_live,

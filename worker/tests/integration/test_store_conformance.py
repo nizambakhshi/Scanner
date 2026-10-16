@@ -302,9 +302,18 @@ async def test_claim_marks_in_flight_and_is_not_returned_again(store: Any, instr
     claims = await store.claim_due_notifications(channel=Channel.TELEGRAM, now=minute(11), limit=10)
     assert len(claims) == 1
     assert claims[0].delivery.delivery_status == DeliveryStatus.IN_FLIGHT
+    assert claims[0].delivery.attempt_count == 1, (
+        "the claim counts the attempt being made now; both stores must agree"
+    )
 
     again = await store.claim_due_notifications(channel=Channel.TELEGRAM, now=minute(12), limit=10)
     assert again == [], "an IN_FLIGHT delivery must never be double-dispatched"
+
+    swept = await store.requeue_in_flight_deliveries()
+    assert swept == 1, "a crash must not strand a row in IN_FLIGHT forever"
+    retried = await store.claim_due_notifications(channel=Channel.TELEGRAM, now=minute(13), limit=10)
+    assert len(retried) == 1
+    assert retried[0].delivery.attempt_count == 2, "the spent attempt is remembered"
 
 
 # ── leases ────────────────────────────────────────────────────────────────────

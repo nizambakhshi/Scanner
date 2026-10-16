@@ -211,6 +211,32 @@ async def test_credentials_from_the_database_reach_the_sender_and_the_engine(
     assert CHAT not in caplog.text
 
 
+async def test_credentials_with_an_empty_environment_still_arm_the_engine() -> None:
+    """The live-incident regression: production kept its keys in the dashboard.
+
+    The environment is empty by design there, so the send gate had to judge the
+    ADOPTED credentials — the old env-only gate left a saved, enabled bot
+    paging nobody.
+    """
+    store = InMemoryStore()
+    store.ops_settings["telegram"] = {
+        "version": 1,
+        "enabled": True,
+        "bot_token": SECRET,
+        "chat_id": CHAT,
+    }
+    rt = runtime(store)  # env token and chat deliberately empty, as on the live box
+    await build_session(rt, store)
+    assert rt._alerts is not None and rt._alerts.telegram_enabled is False
+    assert rt.settings.notifications_enabled is False, "the env gate alone says no"
+
+    summary = await rt._adopt_alert_settings()
+
+    assert summary["telegram"] == "ops_settings"
+    assert rt._alerts.telegram_enabled is True, "adopted credentials arm the engine"
+    assert rt._alerts.telegram_chat_id == CHAT
+
+
 async def test_a_saved_token_switched_off_pages_nobody() -> None:
     store = InMemoryStore()
     store.ops_settings["telegram"] = {
