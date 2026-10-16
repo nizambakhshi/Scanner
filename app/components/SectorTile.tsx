@@ -31,6 +31,7 @@ export function SectorTile({ initial }: { initial: SectorQuoteRow[] | null }) {
   useEffect(() => {
     let cancelled = false;
     async function poll() {
+      if (document.hidden) return; // see the visibility listener below
       try {
         const response = await fetch("/api/sectors", { cache: "no-store" });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -46,9 +47,18 @@ export function SectorTile({ initial }: { initial: SectorQuoteRow[] | null }) {
     }
     void poll();
     timer.current = setInterval(poll, POLL_MS);
+    // A hidden tab that keeps polling keeps one Vercel instance warm forever,
+    // and that instance holds a client slot in the 15-slot session pooler —
+    // background tabs are how the pool fills up. On return to the foreground,
+    // poll at once so the operator does not look at last-minute numbers.
+    function onVisible() {
+      if (!document.hidden) void poll();
+    }
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
       if (timer.current) clearInterval(timer.current);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
 

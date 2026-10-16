@@ -134,11 +134,20 @@ function RefreshButton() {
   return (
     <button
       type="button"
-      onClick={() => {
+      onClick={async () => {
+        // Single-flight: router.refresh() re-runs the page's whole server render
+        // (up to seven database reads), and on the session pooler a spam-click
+        // multiplies that across warming serverless instances until Supavisor
+        // refuses with EMAXCONNSESSION. One refresh at a time, until it lands.
+        if (busy) return;
         setBusy(true);
-        router.refresh();
-        window.setTimeout(() => setBusy(false), 600);
+        try {
+          await router.refresh();
+        } finally {
+          setBusy(false);
+        }
       }}
+      disabled={busy}
       className="rounded-md border border-line px-2.5 py-1 text-[12px] font-medium text-ink-2 transition hover:border-line-2 hover:bg-hover"
       aria-label="Reload from the data source"
     >

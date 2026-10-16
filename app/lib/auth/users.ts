@@ -158,8 +158,14 @@ export async function authenticate(
   }
 
   if (usesPostgres()) {
-    await dbRecordAttempt(normalised, request.ip, true);
-    await query("UPDATE app_users SET last_login_at = now() WHERE id = $1::bigint", [user.id]);
+    // The password is proved at this point. Bookkeeping after it must not turn a
+    // correct login into a failure when the session pooler is at its cap — the
+    // audit read paths already fail open, and a refused login_attempts write is
+    // exactly the EMAXCONNSESSION storm a reload burst creates.
+    await dbRecordAttempt(normalised, request.ip, true).catch(() => {});
+    await query("UPDATE app_users SET last_login_at = now() WHERE id = $1::bigint", [
+      user.id,
+    ]).catch(() => {});
   } else {
     localFailures.delete(key(normalised, request.ip));
   }
