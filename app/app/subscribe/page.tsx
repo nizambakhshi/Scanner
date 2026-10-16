@@ -28,6 +28,15 @@ export default async function SubscribePage() {
           </span>
         </Link>
         <div className="flex items-center gap-2">
+          {/* The page's own entry in the row, marked active so the header reads as
+              the same navigation bar the dashboard has. */}
+          <Link
+            href="/subscribe"
+            aria-current="page"
+            className="rounded-md border border-line-2 px-3 py-1.5 text-[13px] font-medium text-ink"
+          >
+            Subscribe
+          </Link>
           {user ? (
             <Link
               href={isAdminRole(user.role) ? "/" : "/watchlist"}

@@ -21,6 +21,7 @@ const LINKS = [
   { href: "/", label: "Board" },
   { href: "/watchlist", label: "Watchlist" },
   { href: "/news", label: "News" },
+  { href: "/subscribe", label: "Subscribe" },
   { href: "/account", label: "Account" },
   { href: "/accounts", label: "Accounts", admin: true },
   { href: "/strategy", label: "Strategy", admin: true },

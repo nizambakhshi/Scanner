@@ -30,9 +30,20 @@ export default async function LoginPage() {
           sees first, and a board they cannot read is a bad way to start a session.
           In flow above the banner rather than pinned over it — the banner wraps on a
           narrow screen, and a control that lands on top of "SIMULATED DATA" is worse
-          than a control that sits one row higher. */}
-      <div className="flex justify-end px-4 pt-3">
-        <ThemeToggle />
+          than a control that sits one row higher. The same row carries the way in for
+          someone without an account: the top nav is where a visitor looks for it, and
+          the plain-text hint below the form stays for the ones who read down. */}
+      <div className="mx-auto flex max-w-[1400px] items-center justify-between px-4 py-3">
+        <span className="font-serif text-[17px] italic leading-none tracking-tight">Intraday Scanner</span>
+        <div className="flex items-center gap-2">
+          <Link
+            href="/subscribe"
+            className="rounded-md border border-line px-3 py-1.5 text-[13px] font-medium text-ink-2 transition hover:bg-hover hover:text-ink"
+          >
+            Subscribe
+          </Link>
+          <ThemeToggle />
+        </div>
       </div>
       <SimulatedBanner meta={meta} />
       <div className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-[1400px] items-center justify-center px-4 py-10">
