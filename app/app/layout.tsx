@@ -16,9 +16,9 @@ import "./globals.css";
  */
 
 export const metadata: Metadata = {
-  title: "Bullish Scanner — operator dashboard",
+  title: "Intraday Scanner — operator dashboard",
   description:
-    "Read-only operator dashboard for the NSE intraday bullish scanner: daily watchlist, alert feed, delivery health and worker status.",
+    "Operator dashboard for the NSE intraday scanner: daily watchlist, alert feed, delivery health and worker status.",
   // A tool showing one person's trading state must not be indexed, and must not
   // describe itself to a crawler. `app/robots.ts` enforces the same rule at the path.
   robots: { index: false, follow: false, noarchive: true },

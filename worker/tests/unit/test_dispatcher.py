@@ -36,22 +36,28 @@ NOW = minute(6)
 class StubSender:
     """TelegramSender stand-in: replays canned results, records calls.
 
-    Result i is used for call i (the last result repeats), so a caller can
-    script "fail once, then succeed". ``probe`` runs *during* the send, which
-    is how the tests observe the IN_FLIGHT claim.
+    Result i is used for call i (the last result repeats), and *calls* count
+    across channels — with two chats in play, results[0] lands on channel one
+    and results[1] on channel two, which is how a partial delivery is scripted.
+    ``probe`` runs *during* a send, which is how the tests observe the
+    IN_FLIGHT claim.
     """
 
-    def __init__(self, *results):
+    def __init__(self, *results, chats=None):
         self.results = list(results)
         self.calls = []
         self.probe = None
+        self.chat_targets = [CHAT] if chats is None else list(chats)
 
-    async def send(self, text, *, chat_id=None):
-        self.calls.append({"text": text, "chat_id": chat_id})
-        if self.probe is not None:
-            self.probe()
-        index = min(len(self.calls) - 1, len(self.results) - 1)
-        return self.results[index]
+    async def send_all(self, text):
+        out = []
+        for chat in self.chat_targets:
+            self.calls.append({"text": text, "chat_id": chat})
+            if self.probe is not None:
+                self.probe()
+            index = min(len(self.calls) - 1, len(self.results) - 1)
+            out.append((chat, self.results[index]))
+        return out
 
     async def close(self):
         pass
@@ -124,7 +130,7 @@ async def test_confirmed_send_marks_row_delivered_with_provider_message_id():
     assert row.delivered_at == NOW
     assert row.attempt_count == 1
     assert row.last_error is None
-    assert sender.calls[0]["chat_id"] == CHAT, "the queued destination is the row's, not the settings'"
+    assert sender.calls[0]["chat_id"] == CHAT, "the send goes to the sender's live channels"
     assert "TATAMOTORS" in sender.calls[0]["text"]
 
 
@@ -149,6 +155,51 @@ async def test_permanent_rejection_marks_row_permanently_failed_without_retry():
     assert row.next_retry_at is None, "a bad chat id must not schedule another attempt"
     assert row.attempt_count == 1
     assert len(sender.calls) == 1
+
+
+# ── multi-channel fan-out (the /alerts page's channels) ─────────────────────
+
+
+async def test_partial_delivery_is_delivered_with_the_miss_recorded():
+    store, _, delivery_id = await queue_entry_alert()
+    sender = StubSender(delivered_result(message_id=9), permanent_result(), chats=[CHAT, "chat-2"])
+    report = await make_dispatcher(store, sender).run_once(now=NOW)
+    assert report.delivered == 1
+    assert len(sender.calls) == 2, "every channel gets its own send"
+    row = store.deliveries[delivery_id]
+    assert row.delivery_status is DeliveryStatus.DELIVERED
+    assert row.provider_message_id == "9"
+    assert row.last_error is not None and "chat-2" in row.last_error, "the miss is on the row"
+    assert any("chat-2" in e for e in report.errors), "and in the report"
+
+
+async def test_one_retryable_failure_among_many_channels_keeps_the_row_retryable():
+    # A permanent rejection on one channel must not kill an alert the other
+    # channel would still take — only a unanimous rejection is terminal.
+    store, _, delivery_id = await queue_entry_alert()
+    sender = StubSender(permanent_result(), server_error_result(), chats=[CHAT, "chat-2"])
+    report = await make_dispatcher(store, sender).run_once(now=NOW)
+    assert report.retrying == 1 and report.permanently_failed == 0
+    row = store.deliveries[delivery_id]
+    assert row.delivery_status is DeliveryStatus.FAILED
+    assert row.next_retry_at is not None
+
+
+async def test_unanimous_permanent_rejection_is_terminal():
+    store, _, delivery_id = await queue_entry_alert()
+    sender = StubSender(permanent_result(), permanent_result(), chats=[CHAT, "chat-2"])
+    report = await make_dispatcher(store, sender).run_once(now=NOW)
+    assert report.permanently_failed == 1
+    assert store.deliveries[delivery_id].delivery_status is DeliveryStatus.PERMANENTLY_FAILED
+
+
+async def test_no_configured_channel_fails_permanently_without_sending():
+    store, _, delivery_id = await queue_entry_alert()
+    sender = StubSender(delivered_result(), chats=[])
+    report = await make_dispatcher(store, sender).run_once(now=NOW)
+    assert report.permanently_failed == 1
+    assert sender.calls == []
+    assert store.deliveries[delivery_id].last_error == "telegram has no configured channel"
 
 
 # ── retry scheduling and queue draining (§13) ───────────────────────────────

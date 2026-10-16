@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
   TEST_MESSAGE,
+  chatsFingerprint,
   credentialFingerprint,
   effectiveTelegram,
   mergeTelegramSave,
@@ -18,60 +19,67 @@ import {
  * `tests/config.test.ts` records that `TELEGRAM_BOT_TOKEN` is read at all; this file
  * is what keeps that reading harmless: the precedence rules, and above all the
  * claim that nothing which leaves this module — a view, a response body, an error
- * sentence — contains the token or the chat id.
+ * sentence — contains the bot token.
+ *
+ * The channel list is a deliberate exception, since 2026-10-16: the /alerts page
+ * shows the chat ids so the operator can delete a channel they can see. The
+ * *token* has no such need and never crosses a boundary.
  */
 
 const TOKEN = "123456789:AAH_very-secret-token-value";
 const CHAT = "-1009876543210";
+const CHAT2 = "5551234";
 
 const row = (overrides: Partial<TelegramRow> = {}): TelegramRow => ({
   enabled: true,
   botToken: TOKEN,
-  chatId: CHAT,
+  chats: [{ chatId: CHAT, label: null }],
   updatedAt: "2026-10-14T21:00:00+05:30",
   ...overrides,
 });
 
-test("a saved pair beats the environment, and a missing pair falls back to it", () => {
-  const fallback = { token: "999:ENVIRONMENT-TOKEN", chatId: "555555" };
+test("a saved set beats the environment, and a missing set falls back to it", () => {
+  const fallback = { token: "999:ENVIRONMENT-TOKEN", chatId: "55555" };
   const saved = effectiveTelegram(row(), fallback);
   assert.equal(saved.source, "saved");
   assert.equal(saved.configured, true);
   assert.equal(saved.token, TOKEN);
+  assert.deepEqual(saved.chats, [{ chatId: CHAT, label: null }]);
 
   assert.deepEqual(
-    { ...effectiveTelegram(null, fallback), token: "", chatId: "" },
-    { token: "", chatId: "", source: "env", configured: true, enabled: null },
+    { ...effectiveTelegram(null, fallback), token: "", chats: [] },
+    { token: "", chats: [], source: "env", configured: true, enabled: null },
   );
-  assert.equal(effectiveTelegram(null, fallback).token, "999:ENVIRONMENT-TOKEN");
+  assert.equal(effectiveTelegram(null, fallback).chats[0]?.chatId, "55555");
 
-  // Half a row is not a destination: the environment answers instead of a pair
-  // that could never deliver.
-  const half = effectiveTelegram(row({ chatId: "" }), fallback);
-  assert.equal(half.source, "env");
-  assert.equal(half.token, "999:ENVIRONMENT-TOKEN");
+  // A token with no destination is not a set: the environment answers instead of
+  // a pair that could never deliver.
+  const noChats = effectiveTelegram(row({ chats: [] }), fallback);
+  assert.equal(noChats.source, "env");
+  assert.equal(noChats.token, "999:ENVIRONMENT-TOKEN");
 
   const nothing = effectiveTelegram(null, { token: "", chatId: "" });
   assert.equal(nothing.source, "none");
   assert.equal(nothing.configured, false);
+  assert.deepEqual(nothing.chats, []);
 });
 
-test("switching Telegram off blanks the pair, so `configured` cannot lie", () => {
+test("switching Telegram off blanks the set, so `configured` cannot lie", () => {
   const off = effectiveTelegram(row({ enabled: false }));
   assert.equal(off.token, "");
-  assert.equal(off.chatId, "");
+  assert.deepEqual(off.chats, []);
   assert.equal(off.configured, false);
   assert.equal(off.source, "saved");
   // The row is still there — the page says so, and the credentials are not lost.
   assert.equal(off.enabled, false);
 });
 
-test("no view, response or error string ever carries the token or the chat id", () => {
+test("no view, response or error string ever carries the token", () => {
   const view = telegramView(effectiveTelegram(row(), { token: "", chatId: "" }), row());
   const serialised = JSON.stringify(view);
   assert.equal(serialised.includes(TOKEN), false, "the token must not be serialisable");
-  assert.equal(serialised.includes(CHAT), false, "not even the chat id");
   assert.deepEqual(Object.keys(view).sort(), [
+    "chats",
     "configured",
     "enabled",
     "fingerprint",
@@ -79,11 +87,13 @@ test("no view, response or error string ever carries the token or the chat id", 
     "savedAt",
     "source",
   ]);
+  // The channels are visible — that is the point of the panel's Delete buttons.
+  assert.deepEqual(view.chats, [{ chatId: CHAT, label: null }]);
   // A disabled row still shows its fingerprint: the credentials exist, pushing does not.
   const disabled = telegramView(effectiveTelegram(row({ enabled: false })), row({ enabled: false }));
   assert.equal(disabled.configured, false);
   assert.equal(disabled.hasStoredPair, true);
-  assert.equal(disabled.fingerprint, credentialFingerprint(TOKEN, CHAT));
+  assert.equal(disabled.fingerprint, chatsFingerprint(TOKEN, [{ chatId: CHAT, label: null }]));
   assert.equal(telegramView(effectiveTelegram(null), null).fingerprint, null);
 });
 
@@ -91,43 +101,65 @@ test("the fingerprint is the worker's construction, so the two can be compared",
   const expected = createHash("sha256").update(`${TOKEN}\n${CHAT}`, "utf8").digest("hex").slice(0, 12);
   assert.equal(credentialFingerprint(TOKEN, CHAT), expected);
   assert.equal(credentialFingerprint(TOKEN, CHAT).length, 12);
-  // A different chat id is a different destination, and must look different.
-  assert.notEqual(credentialFingerprint(TOKEN, "1234"), expected);
+  // One channel fingerprints identically to the old single-pair document, so a
+  // migrated row still matches the worker's log line.
+  assert.equal(chatsFingerprint(TOKEN, [{ chatId: CHAT, label: null }]), expected);
+  // Several channels join with commas; a different set is a different destination.
+  assert.equal(
+    chatsFingerprint(TOKEN, [{ chatId: CHAT, label: null }, { chatId: CHAT2, label: "team" }]),
+    createHash("sha256").update(`${TOKEN}\n${CHAT},${CHAT2}`, "utf8").digest("hex").slice(0, 12),
+  );
+  assert.notEqual(chatsFingerprint(TOKEN, [{ chatId: CHAT2, label: null }]), expected);
+  assert.equal(chatsFingerprint("", [{ chatId: CHAT, label: null }]), null);
+  assert.equal(chatsFingerprint(TOKEN, []), null);
 });
 
-test("a blank field keeps what is stored, and clearing is explicit", () => {
-  const stored = row();
-  const untouched = mergeTelegramSave({ bot_token: "", chat_id: "", enabled: "true" }, stored);
+test("a blank token keeps what is stored, the channel list replaces, and clearing is explicit", () => {
+  const stored = row({ chats: [{ chatId: CHAT, label: "Alerts" }] });
+  const untouched = mergeTelegramSave({ botToken: "", chats: null, enabled: true, clears: false }, stored);
   assert.equal(untouched.botToken, TOKEN);
-  assert.equal(untouched.chatId, CHAT);
+  assert.deepEqual(untouched.chats, [{ chatId: CHAT, label: "Alerts" }]);
   assert.equal(untouched.clears, false);
 
-  const replaced = mergeTelegramSave({ bot_token: TOKEN, chat_id: "42" }, stored);
-  assert.equal(replaced.chatId, "42");
+  // The panel posts the list it shows: an added row appears, a deleted row goes.
+  const replaced = mergeTelegramSave(
+    { botToken: "", chats: [{ chatId: CHAT, label: null }, { chatId: CHAT2, label: "Team" }], enabled: null, clears: false },
+    stored,
+  );
+  assert.deepEqual(replaced.chats, [{ chatId: CHAT, label: null }, { chatId: CHAT2, label: "Team" }]);
   assert.equal(replaced.botToken, TOKEN);
 
-  const cleared = mergeTelegramSave({ clear: "true" }, stored);
+  const cleared = mergeTelegramSave({ botToken: "", chats: null, enabled: null, clears: true }, stored);
   assert.equal(cleared.botToken, "");
-  assert.equal(cleared.chatId, "");
+  assert.deepEqual(cleared.chats, []);
 
   // With nothing stored, an empty form is not a save — the route calls that out.
-  const fromEmpty = mergeTelegramSave({ bot_token: "", chat_id: "" }, null);
+  const fromEmpty = mergeTelegramSave({ botToken: "", chats: null, enabled: null, clears: false }, null);
   assert.equal(fromEmpty.botToken, "");
+  assert.deepEqual(fromEmpty.chats, []);
   assert.equal(fromEmpty.enabled, false, "no stored row means the switch stays off, not silently on");
 
-  // The switch arrives as a checkbox: "on"/"true"/"false" all mean what they say.
-  assert.equal(mergeTelegramSave({ enabled: "on" }, stored).enabled, true);
-  assert.equal(mergeTelegramSave({ enabled: "false" }, stored).enabled, false);
+  // The switch travels as a real boolean or an explicit null ("keep stored").
+  assert.equal(mergeTelegramSave({ botToken: "", chats: null, enabled: false, clears: false }, stored).enabled, false);
 });
 
 test("an impossible credential is caught before it reaches the database", () => {
-  assert.equal(telegramCredentialProblem("", ""), null, "nothing being saved is nothing to check");
-  assert.match(telegramCredentialProblem(TOKEN, "") ?? "", /both/);
-  assert.match(telegramCredentialProblem("not-a-token", CHAT) ?? "", /bot token/);
-  assert.match(telegramCredentialProblem(TOKEN, "one-billion") ?? "", /chat id/);
-  assert.equal(telegramCredentialProblem(TOKEN, CHAT), null);
+  const one = [{ chatId: CHAT, label: null }];
+  assert.equal(telegramCredentialProblem("", []), null, "nothing being saved is nothing to check");
+  assert.match(telegramCredentialProblem(TOKEN, []) ?? "", /both/);
+  assert.match(telegramCredentialProblem("", one) ?? "", /both/);
+  assert.match(telegramCredentialProblem("not-a-token", one) ?? "", /bot token/);
+  assert.match(telegramCredentialProblem(TOKEN, [{ chatId: "one-billion", label: null }]) ?? "", /chat id/);
+  assert.equal(telegramCredentialProblem(TOKEN, one), null);
   // A group chat id with its leading minus is the common case, not a format error.
-  assert.equal(telegramCredentialProblem("123456:AAH_very-secret-token-value", "-1001234567890"), null);
+  assert.equal(telegramCredentialProblem("123456:AAH_very-secret-token-value", [{ chatId: "-1001234567890", label: null }]), null);
+  // The same chat twice would page the operator twice.
+  assert.match(
+    telegramCredentialProblem(TOKEN, [{ chatId: CHAT, label: null }, { chatId: CHAT, label: "copy" }]) ?? "",
+    /twice/,
+  );
+  // A valid multi-channel set passes.
+  assert.equal(telegramCredentialProblem(TOKEN, [{ chatId: CHAT, label: null }, { chatId: CHAT2, label: "Team" }]), null);
 });
 
 /** A `fetch` stand-in: every failure mode returns or throws what the real client does. */
@@ -142,7 +174,7 @@ function stubFetch(handler: (init: RequestInit) => Promise<{ ok: boolean; status
 }
 
 test("a successful send reports success and nothing else", async () => {
-  const seen: { url?: string; body?: string } = {};
+  const seen: { body?: string } = {};
   const result = await sendTelegramMessage(
     TOKEN,
     CHAT,

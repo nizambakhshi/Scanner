@@ -165,7 +165,7 @@ test("parsing: unknown keys are null, case is tolerated, a repeated param takes 
   assert.equal(parseMemberSort("SCORE"), "score");
   assert.equal(parseMemberSort("nonsense"), null);
   assert.equal(parseMemberSort(undefined), null);
-  assert.equal(parseMemberSort(["rsi", "rank"]), "rsi");
+  assert.equal(parseMemberSort(["rsi", "price"]), "rsi");
   assert.equal(parseStockSort("mcap"), "mcap");
   assert.equal(parseStockSort("rsi"), null); // member-only key is not a stock key
   assert.equal(parseSortDir("asc", "desc"), "asc");
@@ -174,7 +174,7 @@ test("parsing: unknown keys are null, case is tolerated, a repeated param takes 
 });
 
 test("the first click on a column uses its own default; clicking it again flips", () => {
-  assert.equal(memberSortDir("rank"), "asc"); // 1 is the best rank
+  assert.equal(memberSortDir("price"), "desc");
   assert.equal(memberSortDir("rsi"), "asc"); // the dip hunt reads small first
   assert.equal(memberSortDir("score"), "desc");
   assert.equal(stockSortDir("symbol"), "asc");

@@ -4,6 +4,9 @@ import { SimChip } from "@/components/SimulatedBanner";
 import { SectorTile } from "@/components/SectorTile";
 import { WatchlistTable } from "@/components/WatchlistTable";
 import { SignalsTable } from "@/components/SignalsTable";
+import { capForPlan } from "@/lib/accounts";
+import { getCurrentUser } from "@/lib/auth/session";
+import { planForUser } from "@/lib/auth/users";
 import { ago, clock, duration, longDate, orDash } from "@/lib/format";
 import { ok, panel } from "@/lib/panel";
 import { renderNow } from "@/lib/render-time";
@@ -25,6 +28,12 @@ export const dynamic = "force-dynamic";
  * indistinguishable from a screen that has nothing to show.
  */
 export default async function BoardPage() {
+  // The Basic cap applies here too — a user's Board must not be the door around
+  // their Watchlist's paywall. One catalog read plus one small query, and every
+  // failure inside `planForUser` answers UNLIMITED, the grandfather direction.
+  const viewer = await getCurrentUser();
+  const plan = viewer ? await planForUser(viewer) : "UNKNOWN";
+
   // The board is anchored on the IST calendar date, same as the watchlist: the
   // memberships and the feed are read for today, never for "whatever the
   // newest rows happen to be".
@@ -43,8 +52,11 @@ export default async function BoardPage() {
 
   const status = ok(worker) ? worker.data[0] ?? null : null;
   const counts = ok(coverage) ? coverage.data : null;
-  // Belt to the source filter's braces — today's rows only, in code too.
-  const rows = (ok(watchlist) ? watchlist.data : []).filter((row) => !today || row.trading_date === today);
+  // Belt to the source filter's braces — today's rows only, in code too. The
+  // source returns them in score order, so the cap takes the top three of the
+  // same ordering the Watchlist page payswalls from.
+  const todayRows = (ok(watchlist) ? watchlist.data : []).filter((row) => !today || row.trading_date === today);
+  const rows = capForPlan(todayRows, plan);
   const recent = ok(alerts) ? alerts.data : [];
   const scan = ok(initialScan) ? initialScan.data : null;
   const session = ok(days) && today ? (days.data.find((row) => row.trading_date === today) ?? null) : null;

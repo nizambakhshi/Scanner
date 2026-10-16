@@ -2,6 +2,7 @@ import Link from "next/link";
 import { ConfigEditor } from "@/components/ConfigEditor";
 import { Panel, ErrorNote, Empty, PageHeading } from "@/components/ui";
 import { duration, multiple } from "@/lib/format";
+import { requireAdminPage } from "@/lib/auth/session";
 import { ok, panel } from "@/lib/panel";
 import { source } from "@/lib/source";
 
@@ -20,6 +21,7 @@ export const dynamic = "force-dynamic";
  * says so.
  */
 export default async function ConfigPage() {
+  await requireAdminPage();
   const [config, scan] = await Promise.all([panel(() => source().config()), panel(() => source().initialScan())]);
   const row = ok(config) ? config.data : null;
   const scanSummary = ok(scan) ? scan.data : null;

@@ -1,4 +1,4 @@
-import { body, clientIp, fail, guard, json, read } from "@/lib/api";
+import { body, clientIp, fail, adminGuard, json, read } from "@/lib/api";
 import { parseStrategyEdits } from "@/lib/alert-strategies";
 import { readStrategiesState, saveStrategies } from "@/lib/alerts-store";
 
@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
  * from the shipped defaults: `source` says which and `problem` says why.
  */
 export async function GET() {
-  const { denied } = await guard();
+  const { denied } = await adminGuard();
   if (denied) return denied;
   return read(() => readStrategiesState());
 }
@@ -32,7 +32,7 @@ export async function GET() {
  * go and do one.
  */
 export async function POST(request: Request) {
-  const { user, denied } = await guard();
+  const { user, denied } = await adminGuard();
   if (denied) return denied;
   const form = await body(request);
   const current = await readStrategiesState();

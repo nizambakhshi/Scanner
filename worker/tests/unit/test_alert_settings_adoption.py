@@ -16,6 +16,7 @@ rule re-proved at the one call site most tempted to break it.
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import date
 
 from worker.analytics.breakouts import DEFAULTS, StrategiesConfig
 from worker.config import TelegramSettings, WorkerSettings
@@ -375,4 +376,148 @@ async def test_a_broken_settings_read_leaves_the_detectors_running(caplog, monke
     assert summary["strategies"] == "ops_settings"
     assert "alert_strategies_read_failed" in caplog.text
     assert "telegram_setting_read_failed" in caplog.text
+    assert "days_setting_read_failed" in caplog.text, (
+        "the third document takes the same exit: an unreadable days row never "
+        "stops the day, it just keeps the exceptions already in force"
+    )
+
+
+# ── the Telegram channel list (v2 documents) ───────────────────────────────
+
+
+async def test_a_channel_list_reaches_the_sender_in_order() -> None:
+    """The /alerts page's second channel must be a destination, not decoration.
+
+    ``chat_id`` keeps mirroring the first channel (the old single-chat contract
+    still reads it), and everything after it rides ``extra_chat_ids`` down to the
+    sender's fan-out.
+    """
+    store = InMemoryStore()
+    store.ops_settings["telegram"] = {
+        "version": 2,
+        "enabled": True,
+        "bot_token": SECRET,
+        "chat_id": CHAT,
+        "chats": [
+            {"chat_id": CHAT, "label": "primary"},
+            {"chat_id": "-100222", "label": "desk"},
+        ],
+    }
+    rt = runtime(store)
+    await build_session(rt, store)
+
+    summary = await rt._adopt_alert_settings()
+
+    assert summary["telegram"] == "ops_settings"
+    assert rt.telegram.chat_id == CHAT
+    assert rt.telegram.extra_chat_ids == ("-100222",)
+    assert rt._sender is not None
+    assert rt._sender.chat_targets == [CHAT, "-100222"]
+
+
+async def test_switching_off_blanks_every_channel() -> None:
+    store = InMemoryStore()
+    doc = {
+        "version": 2,
+        "enabled": True,
+        "bot_token": SECRET,
+        "chat_id": CHAT,
+        "chats": [{"chat_id": CHAT}, {"chat_id": "-100222"}],
+    }
+    store.ops_settings["telegram"] = doc
+    rt = runtime(store)
+    await rt._adopt_alert_settings()
+    assert rt.telegram.extra_chat_ids == ("-100222",)
+
+    doc["enabled"] = False
+    summary = await rt._adopt_alert_settings()
+
+    assert rt.telegram.extra_chat_ids == ()
+    assert rt.telegram.configured is False, "switched off means no channel pages"
+    assert summary["telegram_configured"] is False
+
+
+async def test_a_migrated_single_channel_row_keeps_the_old_fingerprint() -> None:
+    """One channel must not look like a change when the page gains the list.
+
+    The app writes ``chats: [one]`` and mirrors ``chat_id``; the worker's
+    fingerprint covers the whole channel list. If a single-channel v2 row hashed
+    differently from its v1 twin, every database migrated overnight would print a
+    spurious ``telegram_credentials_applied`` at the next poll.
+    """
+    store = InMemoryStore()
+    store.ops_settings["telegram"] = {
+        "version": 1,
+        "enabled": True,
+        "bot_token": SECRET,
+        "chat_id": CHAT,
+    }
+    rt = runtime(store)
+    await rt._adopt_alert_settings()
+    v1_fingerprint = rt._telegram_fingerprint
+
+    store.ops_settings["telegram"] = {
+        "version": 2,
+        "enabled": True,
+        "bot_token": SECRET,
+        "chat_id": CHAT,
+        "chats": [{"chat_id": CHAT, "label": "primary"}],
+    }
+    await rt._adopt_alert_settings()
+
+    assert rt._telegram_fingerprint == v1_fingerprint
+    assert rt.telegram.extra_chat_ids == ()
+
+    store.ops_settings["telegram"]["chats"].append({"chat_id": "-100222"})
+    await rt._adopt_alert_settings()
+    assert rt._telegram_fingerprint != v1_fingerprint, (
+        "adding a real second channel IS a change, and must reach the sender"
+    )
+    assert rt.telegram.extra_chat_ids == ("-100222",)
+
+
+# ── the days document ───────────────────────────────────────────────────────
+
+
+async def test_the_days_page_closes_a_weekday_and_opens_a_weekend() -> None:
+    """A save on /days must decide whether tomorrow is a working day.
+
+    2026-10-26 is a Monday, 2026-11-14 a Saturday: the overrides have to beat the
+    plain weekday rule in both directions, on the very next decision.
+    """
+    store = InMemoryStore()
+    store.ops_settings["days"] = {
+        "version": 1,
+        "off_days": [{"date": "2026-10-26", "note": "operator closed"}],
+        "on_days": [{"date": "2026-11-14", "note": "special session"}],
+    }
+    rt = runtime(store)
+
+    await rt._adopt_alert_settings()
+
+    assert date(2026, 10, 26) in rt.calendar.off_days
+    assert date(2026, 11, 14) in rt.calendar.on_days
+    assert rt.calendar.is_trading_day(date(2026, 10, 26)) is False
+    assert rt.calendar.is_trading_day(date(2026, 11, 14)) is True
+
+
+async def test_an_unreadable_days_row_keeps_the_last_exceptions(caplog) -> None:
+    store = InMemoryStore()
+    store.ops_settings["days"] = {
+        "off_days": [{"date": "2026-10-26"}],
+        "on_days": [],
+    }
+    rt = runtime(store)
+    await rt._adopt_alert_settings()
+    assert date(2026, 10, 26) in rt.calendar.off_days
+
+    store.ops_settings["days"] = {"off_days": "closed", "on_days": []}
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        await rt._adopt_alert_settings()
+
+    assert date(2026, 10, 26) in rt.calendar.off_days, (
+        "the last obeyable exceptions stay in force, as with the strategies"
+    )
+    assert "days_document_invalid" in caplog.text
 

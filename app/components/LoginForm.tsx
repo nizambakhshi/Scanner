@@ -2,8 +2,9 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { isAdminRole } from "@/lib/roles";
 
-type Response = { error?: string; setupProblem?: boolean } | { ok?: boolean };
+type Response = { error?: string; setupProblem?: boolean } | { ok?: boolean; user?: { role?: string } };
 
 export function LoginForm({ setupProblem }: { setupProblem: string | null }) {
   const router = useRouter();
@@ -38,8 +39,10 @@ export function LoginForm({ setupProblem }: { setupProblem: string | null }) {
           return;
         }
         // The cookie is what authorises every page; without refreshing the server
-        // cache the board would still render as signed out.
-        router.replace("/");
+        // cache the board would still render as signed out. A plain user lands on
+        // their product — the Watchlist — while the operator's Board stays home.
+        const role = (payload as { user?: { role?: string } }).user?.role ?? "";
+        router.replace(role && !isAdminRole(role) ? "/watchlist" : "/");
         router.refresh();
       }}
     >

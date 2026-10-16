@@ -74,6 +74,7 @@ from .timeutils import (
     TradingCalendar,
     load_calendar,
     now_ist,
+    parse_days,
     to_ist,
 )
 from .watchlist import WatchlistManager
@@ -453,9 +454,9 @@ class WorkerRuntime:
         )
 
     async def _adopt_alert_settings(self) -> dict[str, Any]:
-        """Arm the detectors and the Telegram credentials from ``ops_settings``.
+        """Arm the detectors, the Telegram credentials and the calendar from ``ops_settings``.
 
-        Two documents the /alerts page owns, read the same way the retention knob
+        Three documents the dashboard owns, read the same way the retention knob
         is read: the dashboard is the writer, the worker is the reader, and a value
         this process cannot parse is *reported* rather than quietly replaced by a
         default — a page that says "armed" while the detector never runs is the
@@ -467,6 +468,9 @@ class WorkerRuntime:
           fallback, so a database that has never seen the page still delivers what
           ``TELEGRAM_BOT_TOKEN`` was wired for. The token itself is never logged and
           never leaves this method; only a hash of it is kept, to notice a change.
+        * ``days`` — the /days page's calendar exceptions, adopted into the shared
+          trading calendar. No row is the plain weekday rule, same as before the
+          page existed; a malformed row keeps the last adopted exceptions running.
         """
         summary: dict[str, Any] = {
             "strategies": self._strategies_source,
@@ -516,40 +520,98 @@ class WorkerRuntime:
             credentials = None
         if credentials:
             token = str(credentials.get("bot_token") or "").strip()
-            chat_id = str(credentials.get("chat_id") or "").strip()
-            if token and chat_id:
+            # v2 documents carry a `chats` list; the mirrored `chat_id` stays for
+            # readers that predate the list, and a pre-v2 row is exactly that
+            # shape — so the fallback is the ordinary path for old saves, not a
+            # compat shim to delete later.
+            chat_ids: list[str] = []
+            raw_chats = credentials.get("chats")
+            if isinstance(raw_chats, list):
+                for entry in raw_chats:
+                    if isinstance(entry, dict):
+                        chat = str(entry.get("chat_id") or "").strip()
+                        if chat:
+                            chat_ids.append(chat)
+            if not chat_ids:
+                legacy = str(credentials.get("chat_id") or "").strip()
+                if legacy:
+                    chat_ids = [legacy]
+            if token and chat_ids:
                 # `enabled` is the page's master switch; a saved token that the
                 # operator switched off must not page the phone just because it
                 # is still sitting in the row.
                 enabled = credentials.get("enabled")
                 self.telegram = replace(
-                    self.settings.telegram, bot_token=token, chat_id=chat_id
+                    self.settings.telegram,
+                    bot_token=token,
+                    chat_id=chat_ids[0],
+                    extra_chat_ids=tuple(chat_ids[1:]),
                 )
                 if isinstance(enabled, bool) and not enabled:
                     # Blanked rather than left configured: `configured` is what the
-                    # alert engine gates on, so switching off must switch off.
-                    self.telegram = replace(self.telegram, bot_token="", chat_id="")
+                    # alert engine gates on, so switching off must switch off —
+                    # every channel, not just the primary.
+                    self.telegram = replace(
+                        self.telegram, bot_token="", chat_id="", extra_chat_ids=()
+                    )
                 self._telegram_source = "ops_settings"
             else:
                 # Two different states share this branch, and only one of them is a
-                # problem. A row with *one* value is a save that went off halfway —
-                # the operator must see it. A row with neither is the placeholder
-                # migration 0010 seeds, i.e. a database that has never been used by
-                # the page; this method runs every 60 s, so warning about that would
-                # print several hundred lines a day and bury the half-saved case.
-                if token or chat_id:
+                # problem. A row with *one half* of the credential is a save that
+                # went off halfway — the operator must see it. A row with neither
+                # is the placeholder migration 0010 seeds, i.e. a database that has
+                # never been used by the page; this method runs every 60 s, so
+                # warning about that would print several hundred lines a day and
+                # bury the half-saved case.
+                if token or chat_ids:
                     log.warning(
                         "telegram_row_incomplete",
-                        note="bot_token and chat_id must both be present; the "
-                        "environment credentials take over",
+                        note="bot_token and at least one chat must both be present; "
+                        "the environment credentials take over",
                         has_token=bool(token),
-                        has_chat_id=bool(chat_id),
+                        chat_count=len(chat_ids),
                     )
                 self._release_saved_credentials()
         else:
             # The row was deleted since the last read: the environment is the
             # credential source again rather than a stale copy of the old page.
             self._release_saved_credentials()
+        # The third dashboard document: the Days page's calendar exceptions. They
+        # land on the shared TradingCalendar, whose `is_trading_day` is the single
+        # gate every consumer (open decision, next-session wait, feed phase,
+        # finalizer) already consults — adopting here means the very next
+        # decision obeys a save, with no restart.
+        try:
+            days_document = await self.store.get_ops_setting("days")
+        except Exception as exc:  # noqa: BLE001 — an unreadable calendar must not stop the day
+            log.warning(
+                "days_setting_read_failed",
+                error=scrub(f"{type(exc).__name__}: {exc}")[:200],
+                note="the calendar exceptions already in force stay in force",
+            )
+            days_document = None
+        if days_document is not None:
+            try:
+                off_days, on_days = parse_days(days_document)
+            except ValueError as exc:
+                log.error(
+                    "days_document_invalid",
+                    error=scrub(str(exc))[:300],
+                    action_required="re-save /days; the stored calendar cannot be obeyed",
+                )
+            else:
+                if off_days != self.calendar.off_days or on_days != self.calendar.on_days:
+                    # In place, because the pipeline holds this same object: an
+                    # adopted Saturday is every consumer's Saturday at once.
+                    self.calendar.off_days.clear()
+                    self.calendar.off_days.update(off_days)
+                    self.calendar.on_days.clear()
+                    self.calendar.on_days.update(on_days)
+                    log.info(
+                        "days_adopted",
+                        off_days=sorted(day.isoformat() for day in off_days),
+                        on_days=sorted(day.isoformat() for day in on_days),
+                    )
         summary["telegram"] = self._telegram_source
         summary["strategies"] = self._strategies_source
         summary["telegram_configured"] = self.telegram.configured
@@ -581,10 +643,16 @@ class WorkerRuntime:
         pipeline = self.pipeline
         if pipeline is not None:
             pipeline.reconfigure_breakouts(self.strategies)
-        # Over token *and* chat id: pasting a different chat id is a change that has
-        # to reach the sender, and neither value can be logged, so neither is echoed.
+        # Over token *and* the whole channel list, comma-joined in order: pasting
+        # a different chat id, adding a second channel, or reordering them are all
+        # changes that have to reach the sender, and neither value can be logged,
+        # so neither is echoed. One channel hashes the same string the old pair
+        # did — a migrated row keeps matching the worker log's fingerprint.
+        channel_ids = ",".join(
+            chat for chat in (self.telegram.chat_id, *self.telegram.extra_chat_ids) if chat
+        )
         fingerprint = hashlib.sha256(
-            f"{self.telegram.bot_token}\n{self.telegram.chat_id}".encode()
+            f"{self.telegram.bot_token}\n{channel_ids}".encode()
         ).hexdigest()[:12]
         if fingerprint == self._telegram_fingerprint:
             return

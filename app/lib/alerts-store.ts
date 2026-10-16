@@ -1,6 +1,7 @@
 /**
- * The /alerts page's database half: two `ops_settings` documents and the audit
- * rows that explain every change to them.
+ * The admin pages' database half: the `ops_settings` documents they own
+ * (`alert_strategies`, `telegram`, `days`) and the audit rows that explain every
+ * change to them.
  *
  * Shape of the arrangement, stated because the two processes depend on it:
  * **the dashboard writes, the worker reads.** The worker re-reads both keys every
@@ -18,8 +19,8 @@
  *   was present, and the twelve-hex fingerprint of the pair — never the token,
  *   never the chat id. A journal that records credentials is a leak with a
  *   nicer name.
- * * Both rows are `ON CONFLICT (key) DO UPDATE`: this page owns exactly two keys
- *   and cannot shadow anything else in the table.
+ * * Both kinds of row are `ON CONFLICT (key) DO UPDATE`: these pages own exactly
+ *   three keys and cannot shadow anything else in the table.
  */
 
 import { query, type Raw } from "./db";
@@ -37,12 +38,14 @@ import {
 } from "./alert-strategies";
 import {
   TELEGRAM_SETTINGS_KEY,
-  credentialFingerprint,
+  chatsFingerprint,
   effectiveTelegram,
   telegramView,
+  type TelegramChat,
   type TelegramRow,
   type TelegramView,
 } from "./telegram";
+import { DAYS_SETTINGS_KEY, daysDiff, defaultDays, parseDays, type DaysDoc, type DaysState } from "./days";
 
 export const ALERT_STRATEGIES_KEY = "alert_strategies";
 
@@ -194,31 +197,47 @@ export async function saveStrategies(input: {
  *
  * The return type is not a view type: callers must pass it through
  * `effectiveTelegram` → `telegramView` before anything reaches a response.
+ *
+ * A `chats` array is read when present; a v1 document (or the placeholder
+ * migration 0010 seeds) falls back to its single `chat_id`, so the page shows
+ * the stored destination either way.
  */
 export async function readTelegramRow(): Promise<TelegramRow | null> {
   const row = await readOpsRow(TELEGRAM_SETTINGS_KEY);
   if (!row) return null;
   const value = storedDocument(row.value) ?? {};
   const enabled = typeof value.enabled === "boolean" ? value.enabled : false;
-  return {
-    enabled,
-    botToken: typeof value.bot_token === "string" ? value.bot_token.trim() : "",
-    chatId: typeof value.chat_id === "string" ? value.chat_id.trim() : "",
-    updatedAt: toIst(row.updated_at as string | null),
-  };
+  const botToken = typeof value.bot_token === "string" ? value.bot_token.trim() : "";
+  const listed = Array.isArray(value.chats)
+    ? (value.chats as unknown[])
+        .map((entry): TelegramChat | null => {
+          const chat = (entry ?? {}) as Raw;
+          const chatId = typeof chat.chat_id === "string" ? chat.chat_id.trim() : "";
+          if (chatId === "") return null;
+          return { chatId, label: typeof chat.label === "string" && chat.label.trim() !== "" ? chat.label.trim() : null };
+        })
+        .filter((chat): chat is TelegramChat => chat !== null)
+    : [];
+  const legacy = typeof value.chat_id === "string" ? value.chat_id.trim() : "";
+  const chats = listed.length > 0 ? listed : legacy !== "" ? [{ chatId: legacy, label: null }] : [];
+  return { enabled, botToken, chats, updatedAt: toIst(row.updated_at as string | null) };
 }
 
 /**
  * Replace the credential half of the Telegram row.
  *
- * `merged` must already contain the complete pair to store — the caller decides
- * whether a blank field means "keep the stored value" (`mergeTelegramSave`).
- * The audit row is written from the *merged* pair's fingerprint and two booleans.
+ * `chats` must already contain the complete channel list to store — the caller
+ * decides whether a missing list means "keep the stored channels"
+ * (`mergeTelegramSave`). The document is written as version 2 with the first
+ * channel **mirrored into `chat_id`**: the live worker reads that field, and a
+ * chats-only row would look half-saved to it and fall back to the environment —
+ * a silent destination change. The audit row is written from the *stored*
+ * set's fingerprint, a count, and two booleans; never a chat id, never a token.
  */
 export async function saveTelegram(input: {
   enabled: boolean;
   botToken: string;
-  chatId: string;
+  chats: TelegramChat[];
   cleared: boolean;
   actor: string;
   actorRole?: string | null;
@@ -227,13 +246,14 @@ export async function saveTelegram(input: {
   const before = await readTelegramRow();
   const changed =
     (before?.botToken ?? "") !== input.botToken ||
-    (before?.chatId ?? "") !== input.chatId ||
-    (before?.enabled ?? false) !== input.enabled;
+    (before?.enabled ?? false) !== input.enabled ||
+    before?.chats.map((chat) => chat.chatId).join(",") !== input.chats.map((chat) => chat.chatId).join(",");
   const document = {
-    version: 1,
+    version: 2,
     enabled: input.enabled,
     bot_token: input.botToken,
-    chat_id: input.chatId,
+    chat_id: input.chats[0]?.chatId ?? "",
+    chats: input.chats.map((chat) => ({ chat_id: chat.chatId, label: chat.label })),
   };
   const written = await query<Raw>(
     `WITH upserted AS (
@@ -251,14 +271,15 @@ export async function saveTelegram(input: {
       document,
       input.actor,
       input.actorRole ?? "SUPER_ADMIN",
-      // The journal records that credentials exist and which pair they are, in a
-      // form that is worthless to a reader. Never `bot_token`, never `chat_id`.
+      // The journal records that credentials exist and how many destinations they
+      // cover, in a form that is worthless to a reader. Never `bot_token`, never
+      // a chat id.
       {
         enabled: input.enabled,
         has_token: input.botToken !== "",
-        has_chat_id: input.chatId !== "",
+        chat_count: input.chats.length,
         cleared: input.cleared,
-        fingerprint: input.botToken !== "" && input.chatId !== "" ? credentialFingerprint(input.botToken, input.chatId) : null,
+        fingerprint: chatsFingerprint(input.botToken, input.chats),
       },
       input.requestIp ?? null,
     ],
@@ -269,7 +290,7 @@ export async function saveTelegram(input: {
   const stored: TelegramRow = {
     enabled: input.enabled,
     botToken: input.botToken,
-    chatId: input.chatId,
+    chats: input.chats,
     updatedAt: null,
   };
   return { ...telegramView(effectiveTelegram(stored), stored), changed };
@@ -373,3 +394,79 @@ export async function readActivityToday(): Promise<StrategyActivity | null> {
 
 /** The numbers the shipped defaults will run on, for the page's empty state. */
 export const SHIPPED_DEFAULTS = DEFAULT_PARAMS;
+
+/**
+ * The trading-day exceptions the /days page owns.
+ *
+ * Same arrangement as the other two documents: this page writes, the worker
+ * reads. A missing row or one this build cannot parse is the plain weekday
+ * rule — and unlike the Telegram row, *that is also what the worker runs*, so
+ * the page and the detectors can never disagree about which days are on.
+ */
+export async function readDaysState(): Promise<DaysState> {
+  const [row, lastChange] = await Promise.all([
+    readOpsRow(DAYS_SETTINGS_KEY),
+    asAuditRow("days_update").catch(() => null),
+  ]);
+  if (!row) {
+    return { doc: defaultDays(), source: "default", updatedAt: null, lastChange };
+  }
+  const parsed = parseDays(storedDocument(row.value) ?? row.value);
+  return {
+    // A row the parser refuses falls back to the plain rule *displayed as the
+    // default*: the page says "weekday rule", because that is what runs.
+    doc: parsed.ok ? parsed.doc : defaultDays(),
+    source: parsed.ok ? "saved" : "default",
+    updatedAt: toIst(row.updated_at as string | null),
+    lastChange,
+  };
+}
+
+/**
+ * Write the exceptions document and journal it in one round trip.
+ *
+ * `changes` lists the dates that moved, not the whole document, so the audit
+ * table reads as a record of decisions ("2026-10-26 added to skip"). An
+ * unchanged save writes nothing at all.
+ */
+export async function saveDays(input: {
+  doc: DaysDoc;
+  actor: string;
+  actorRole?: string | null;
+  requestIp?: string | null;
+}): Promise<{ changes: ReturnType<typeof daysDiff>; applied: boolean }> {
+  const current = await readDaysState();
+  const changes = daysDiff(current.doc, input.doc);
+  if (Object.keys(changes).length === 0) {
+    return { changes, applied: false };
+  }
+  const written = await query<Raw>(
+    `WITH upserted AS (
+       INSERT INTO ops_settings (key, value)
+       VALUES ($1::text, $2::jsonb)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+       RETURNING 1
+     ), journaled AS (
+       INSERT INTO audit_logs (actor, actor_role, action, entity_type, entity_id, previous_value, new_value, request_ip)
+       VALUES ($3::text, $4::text, 'days_update', 'ops_settings', $1::text,
+               $5::jsonb, jsonb_build_object('changes', $6::jsonb), $7::text)
+       RETURNING 1
+     )
+     SELECT (SELECT count(*) FROM upserted)::int AS upserted,
+            (SELECT count(*) FROM journaled)::int AS journaled`,
+    [
+      DAYS_SETTINGS_KEY,
+      // An object, never `JSON.stringify`: the driver binds it as a jsonb value.
+      input.doc,
+      input.actor,
+      input.actorRole ?? "SUPER_ADMIN",
+      current.doc,
+      changes,
+      input.requestIp ?? null,
+    ],
+  );
+  if (Number(written[0]?.upserted ?? 0) < 1) {
+    throw new Error("the days row was not written — nothing changed in the database");
+  }
+  return { changes, applied: true };
+}

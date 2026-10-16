@@ -1,4 +1,5 @@
 import { Panel, Metric, ErrorNote, Empty, PageHeading } from "@/components/ui";
+import { requireAdminPage } from "@/lib/auth/session";
 import { duration, longDate, orDash } from "@/lib/format";
 import { ok, panel } from "@/lib/panel";
 import { source } from "@/lib/source";
@@ -17,6 +18,7 @@ const LIMITS = [10, 30, 90, 250];
  * is a different answer from a day with zero signals and zero candles at all.
  */
 export default async function HistoryPage({ searchParams }: { searchParams: Promise<{ limit?: string }> }) {
+  await requireAdminPage();
   const { limit } = await searchParams;
   const wanted = LIMITS.includes(Number(limit)) ? Number(limit) : 30;
   const days = await panel(() => source().history(wanted));
@@ -34,7 +36,7 @@ export default async function HistoryPage({ searchParams }: { searchParams: Prom
   return (
     <div className="space-y-4">
       <PageHeading
-        title="Days"
+        title="History"
         subtitle="One row per trading session the worker finalized. A day that never finalized is not here, because nothing was written for it."
         aside={
           <form method="get" className="flex items-center gap-2 text-[12px] text-muted">

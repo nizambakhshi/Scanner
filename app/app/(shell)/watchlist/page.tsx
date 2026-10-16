@@ -4,6 +4,9 @@ import { StageStrip } from "@/components/StageStrip";
 import { StocksTable } from "@/components/StocksTable";
 import { SignalsTable } from "@/components/SignalsTable";
 import { WatchlistTable } from "@/components/WatchlistTable";
+import { capForPlan } from "@/lib/accounts";
+import { getCurrentUser } from "@/lib/auth/session";
+import { planForUser } from "@/lib/auth/users";
 import {
   SIGNAL_TYPES,
   filterStocksByBias,
@@ -92,6 +95,12 @@ export default async function WatchlistPage({
   const mDir = parseSortDir(params.dir, mSort ? memberSortDir(mSort) : "desc");
   const uDir = parseSortDir(params.udir, uSort ? stockSortDir(uSort) : "desc");
 
+  // The paywall needs to know who is looking before the reads start: a BASIC
+  // account's day is the top three members, and every count, chip and stage
+  // below must agree on that one capped list rather than disagree per panel.
+  const viewer = await getCurrentUser();
+  const plan = viewer ? await planForUser(viewer) : "UNKNOWN";
+
   // The anchor: the IST calendar date — a property of the clock, never of how
   // far the worker has written. The postgres source computes it; the replay
   // source answers with its fixture's scripted session date.
@@ -128,7 +137,12 @@ export default async function WatchlistPage({
   // The belt to the source filter's braces: cut in code too, so a view that
   // answered too broadly (or a fixture with mixed dates) cannot leak a
   // previous session into today's page.
-  const members = today ? allMembers.filter((row) => row.trading_date === today) : allMembers;
+  const dayMembers = today ? allMembers.filter((row) => row.trading_date === today) : allMembers;
+  // The cap runs on the source's own order — tracked first, then by score —
+  // before any viewer-side sort, so a BASIC page cannot un-sort its way to a
+  // fourth symbol. `capForPlan` truncates and never reorders.
+  const members = capForPlan(dayMembers, plan);
+  const cappedCount = dayMembers.length - members.length;
   const feedRows = today ? allFeed.filter((row) => row.trading_date === today) : allFeed;
 
   // Wave three: delivery rows are keyed by the signal ids the feed read returned.
@@ -273,6 +287,13 @@ export default async function WatchlistPage({
             active={state === "ALL"}
           />
         </div>
+
+        {cappedCount > 0 ? (
+          <p className="rounded-md border border-amber/40 bg-amber/10 px-3 py-2 text-[12px] leading-snug text-amber">
+            Basic plan — showing the top {members.length} of {dayMembers.length} memberships today, ranked the way
+            the scanner ranks them. The full list is on Unlimited: <Link href="/subscribe" className="link">see the plans</Link>.
+          </p>
+        ) : null}
 
         <Panel
           title={today ? `Members on ${longDate(today)}` : "Memberships"}

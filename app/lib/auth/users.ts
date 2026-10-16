@@ -19,7 +19,9 @@
 
 import { env, usesPostgres } from "../env";
 import { query, type Raw } from "../db";
-import { hashPassword, verifyPassword } from "./password";
+import { hashPassword, passwordProblem, verifyPassword } from "./password";
+import { createAccountProblem, normalisePlan, type Plan } from "../accounts";
+import { isAdminRole } from "../roles";
 
 export type SessionUser = {
   id: string;
@@ -303,4 +305,328 @@ export function authSetupProblem(): string | null {
       : "AUTH_ADMIN_EMAIL and AUTH_ADMIN_PASSWORD_HASH are not set — run `npm run hash-password`.";
   }
   return null;
+}
+
+/* ── Account management — the Super Admin's half of app_users ─────────────── */
+
+/**
+ * Everything below is called only behind `adminGuard` / `requireAdminPage`.
+ *
+ * The plan column arrives with migration 0013, which is drafted but not yet
+ * approved for application — so every read here is *defensive*: a database
+ * without the column behaves exactly as the migration's grandfathering would,
+ * UNLIMITED for all. That is stated in the row mapper, not hidden in a catch.
+ */
+
+export type ManagedUser = {
+  id: string;
+  email: string;
+  role: string;
+  displayName: string | null;
+  isActive: boolean;
+  plan: Plan;
+  lastLoginAt: string | null;
+  createdAt: string;
+};
+
+/** Does this database have the 0013 `plan` column yet? One cheap catalog read. */
+export async function planColumnExists(): Promise<boolean> {
+  if (!usesPostgres()) return false;
+  const rows = await query<Raw>(
+    "SELECT 1 FROM information_schema.columns WHERE table_name = 'app_users' AND column_name = 'plan'",
+  ).catch(() => [] as Raw[]);
+  return rows.length > 0;
+}
+
+/**
+ * The signed-in user's plan, for the watchlist read paths.
+ *
+ * Three deliberate answers that are not BASIC: no column (0013 unapplied),
+ * replay mode, and a failed read all return UNLIMITED. The first two are 0013's
+ * own grandfather rule — nobody is paywalled by a migration that has not been
+ * applied — and the third follows the house pattern that read failures fail
+ * open: a momentarily unreachable pooler must not blank a paying customer's
+ * own watchlist. The cap is a display entitlement, not a security boundary, so
+ * the leak on a bad read is a few extra rows for one page load.
+ */
+export async function planForUser(user: SessionUser): Promise<Plan | "UNKNOWN"> {
+  if (!usesPostgres()) return "UNLIMITED";
+  // The operator runs the house, they do not rent a room in it: bootstrapAdmin
+  // inserts no plan, so the column default would otherwise cap the admin's own
+  // watchlist at three.
+  if (isAdminRole(user.role)) return "UNLIMITED";
+  if (!(await planColumnExists())) return "UNLIMITED";
+  const rows = await query<Raw>("SELECT plan FROM app_users WHERE id = $1::bigint", [user.id]).catch(() => [] as Raw[]);
+  const plan = rows[0]?.plan;
+  return plan === "BASIC" || plan === "UNLIMITED" ? plan : "UNLIMITED";
+}
+
+export async function listUsers(): Promise<ManagedUser[]> {
+  const hasPlan = await planColumnExists();
+  const rows = await query<Raw>(
+    `SELECT id::text AS id, email, role, display_name, is_active,
+            ${hasPlan ? "plan" : "NULL"}::text AS plan,
+            last_login_at::text AS last_login_at, created_at::text AS created_at
+     FROM app_users
+     ORDER BY CASE role WHEN 'SUPER_ADMIN' THEN 0 WHEN 'ADMIN' THEN 1 ELSE 2 END, email`,
+  );
+  return rows.map((row) => ({
+    id: String(row.id),
+    email: String(row.email),
+    role: String(row.role),
+    displayName: row.display_name === null ? null : String(row.display_name),
+    isActive: row.is_active !== false,
+    // No column yet → everyone is UNLIMITED, which is what migration 0013's
+    // grandfather UPDATE will write for exactly these rows.
+    plan: row.plan === null || row.plan === undefined ? "UNLIMITED" : normalisePlan(row.plan),
+    lastLoginAt: row.last_login_at === null ? null : String(row.last_login_at).replace(" ", "T"),
+    createdAt: String(row.created_at ?? "").replace(" ", "T"),
+  }));
+}
+
+type AdminResult = { ok: true; note: string } | { ok: false; status: number; error: string };
+
+async function journal(actor: SessionUser, action: string, entityId: string, newValue: unknown, ip: string | null): Promise<void> {
+  await query(
+    `INSERT INTO audit_logs (actor, actor_role, action, entity_type, entity_id, new_value, request_ip)
+     VALUES ($1::text, $2::text, $3::text, 'app_users', $4::text, $5::jsonb, $6::text)`,
+    [actor.email, actor.role, action, entityId, newValue, ip],
+  ).catch(() => {}); // the account write already landed; a journal failure must not undo it silently *or* loudly
+}
+
+/**
+ * Create an account with a password the admin just set.
+ *
+ * There is no email sender in this deployment (the account page documents the
+ * same limit for password reset), so the admin *has* to hand the password to
+ * the person out-of-band. That is the honest flow; a "welcome mail" that goes
+ * nowhere would be a lie with a nicer subject line.
+ */
+export async function adminCreateUser(
+  actor: SessionUser,
+  input: { email: string; password: string; role: string; plan: string; displayName?: string },
+  ip: string | null,
+): Promise<AdminResult> {
+  const problem = createAccountProblem(input);
+  if (problem) return { ok: false, status: 400, error: problem };
+  const email = input.email.trim().toLowerCase();
+  const pwProblem = passwordProblemForCreate(input.password);
+  if (pwProblem) return { ok: false, status: 400, error: pwProblem };
+  const stored = await hashPassword(input.password);
+  const hasPlan = await planColumnExists();
+  const written = await query<Raw>(
+    `INSERT INTO app_users (email, password_hash, role, display_name${hasPlan ? ", plan" : ""})
+     VALUES ($1::text, $2::text, $3::text, $4::text${hasPlan ? ", $5::text" : ""})
+     RETURNING id::text AS id`,
+    hasPlan ? [email, stored, input.role, input.displayName?.trim() || null, normalisePlan(input.plan)] : [email, stored, input.role, input.displayName?.trim() || null],
+  ).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/unique|duplicate/i.test(message)) return null;
+    throw error;
+  });
+  if (!written?.[0]) return { ok: false, status: 409, error: "An account with that email already exists." };
+  await journal(actor, "account_create", email, { role: input.role, plan: normalisePlan(input.plan) }, ip);
+  return { ok: true, note: `Created ${email} as ${input.role}, plan ${normalisePlan(input.plan)}. Hand the password over yourself — this app sends no email.` };
+}
+
+/** The create-path password rule: the same strength list the change form uses. */
+function passwordProblemForCreate(password: string): string | null {
+  if (password.length === 0) return "Set a password for this account.";
+  return passwordProblem(password);
+}
+
+/**
+ * Reset any account's password, from the admin's session.
+ *
+ * The deliberate differences from the self-service change: no current password
+ * (the admin *is* the proof), and **every** session of the target is revoked —
+ * including theirs — because a reset they did not ask for must take effect
+ * immediately, not at the next cookie expiry. The target then signs in with the
+ * new password the admin holds.
+ */
+export async function adminResetPassword(
+  actor: SessionUser,
+  targetId: string,
+  newPassword: string,
+  ip: string | null,
+): Promise<AdminResult> {
+  const pwProblem = passwordProblemForCreate(newPassword);
+  if (pwProblem) return { ok: false, status: 400, error: pwProblem };
+  const target = await query<Raw>("SELECT email FROM app_users WHERE id = $1::bigint", [targetId]);
+  const row = target[0];
+  if (!row) return { ok: false, status: 404, error: "No such account." };
+  const stored = await hashPassword(newPassword);
+  await query("UPDATE app_users SET password_hash = $2::text WHERE id = $1::bigint", [targetId, stored]);
+  const revoked = await query<Raw>(
+    "UPDATE app_sessions SET revoked_at = now() WHERE user_id = $1::bigint AND revoked_at IS NULL RETURNING id",
+    [targetId],
+  ).catch(() => [] as Raw[]);
+  await journal(actor, "account_password_reset", String(row.email), { revoked_sessions: revoked.length }, ip);
+  return { ok: true, note: `Password reset for ${row.email}; ${revoked.length} live session(s) signed out.` };
+}
+
+export async function adminSetPlan(actor: SessionUser, targetId: string, plan: string, ip: string | null): Promise<AdminResult> {
+  if (!isPlanValue(plan)) return { ok: false, status: 400, error: "That plan does not exist — BASIC or UNLIMITED." };
+  if (!(await planColumnExists())) {
+    return { ok: false, status: 409, error: "This database has no plan column yet — apply migration 0013 first. Until then every account is UNLIMITED." };
+  }
+  const rows = await query<Raw>(
+    "UPDATE app_users SET plan = $2::text WHERE id = $1::bigint RETURNING email",
+    [targetId, normalisePlan(plan)],
+  );
+  const row = rows[0];
+  if (!row) return { ok: false, status: 404, error: "No such account." };
+  await journal(actor, "account_plan_change", String(row.email), { plan: normalisePlan(plan) }, ip);
+  return { ok: true, note: `${row.email} is now ${normalisePlan(plan)}. It applies on their next watchlist load.` };
+}
+
+export async function adminSetActive(
+  actor: SessionUser,
+  targetId: string,
+  active: boolean,
+  ip: string | null,
+): Promise<AdminResult> {
+  if (targetId === actor.id && !active) {
+    return { ok: false, status: 400, error: "You cannot disable the account you are signed in with — that would strand the dashboard." };
+  }
+  const rows = await query<Raw>(
+    "UPDATE app_users SET is_active = $2::boolean WHERE id = $1::bigint RETURNING email",
+    [targetId, active],
+  );
+  const row = rows[0];
+  if (!row) return { ok: false, status: 404, error: "No such account." };
+  if (!active) {
+    await query("UPDATE app_sessions SET revoked_at = now() WHERE user_id = $1::bigint AND revoked_at IS NULL", [targetId]).catch(() => {});
+  }
+  await journal(actor, active ? "account_enabled" : "account_disabled", String(row.email), { active }, ip);
+  return { ok: true, note: active ? `${row.email} can sign in again.` : `${row.email} is disabled and signed out of every session.` };
+}
+
+function isPlanValue(value: unknown): boolean {
+  return value === "BASIC" || value === "UNLIMITED";
+}
+
+/* ── The subscription queue — migration 0013's second table ───────────────── */
+
+export type SubscriptionRequest = {
+  id: string;
+  email: string;
+  planRequested: Plan;
+  note: string | null;
+  status: "PENDING" | "APPROVED" | "DISMISSED";
+  createdAt: string;
+  handledAt: string | null;
+  handledByEmail: string | null;
+};
+
+export async function subscriptionTableExists(): Promise<boolean> {
+  if (!usesPostgres()) return false;
+  const rows = await query<Raw>(
+    "SELECT 1 FROM information_schema.tables WHERE table_name = 'subscription_requests'",
+  ).catch(() => [] as Raw[]);
+  return rows.length > 0;
+}
+
+/** The Subscribe page's queue read, newest first, capped — an admin page, not a search engine. */
+export async function listSubscriptionRequests(limit = 50): Promise<SubscriptionRequest[]> {
+  if (!(await subscriptionTableExists())) return [];
+  const rows = await query<Raw>(
+    `SELECT id::text AS id, email, plan_requested, note, status,
+            created_at::text AS created_at, handled_at::text AS handled_at, handled_by_email
+     FROM subscription_requests
+     ORDER BY (status = 'PENDING') DESC, created_at DESC
+     LIMIT $1::int`,
+    [limit],
+  );
+  return rows.map((row) => ({
+    id: String(row.id),
+    email: String(row.email),
+    planRequested: normalisePlan(row.plan_requested),
+    note: row.note === null ? null : String(row.note),
+    status: String(row.status) as SubscriptionRequest["status"],
+    createdAt: String(row.created_at ?? "").replace(" ", "T"),
+    handledAt: row.handled_at === null ? null : String(row.handled_at).replace(" ", "T"),
+    handledByEmail: row.handled_by_email === null ? null : String(row.handled_by_email),
+  }));
+}
+
+/**
+ * A public Subscribe press. Unauthenticated by design — this is the one DB write
+ * any visitor makes — so the guards are the shape checks in `lib/accounts.ts`,
+ * the length caps, and the partial unique index that keeps one PENDING per
+ * address. A duplicate ask answers "already in the queue", which is true and
+ * leaks nothing about whether the address exists as an *account*.
+ */
+export async function createSubscriptionRequest(input: {
+  email: string;
+  plan: string;
+  note: string;
+}): Promise<AdminResult> {
+  if (!(await subscriptionTableExists())) {
+    return { ok: false, status: 409, error: "Subscriptions are not open on this database yet (migration 0013 is not applied)." };
+  }
+  const email = input.email.trim().toLowerCase();
+  // The conflict target mirrors the partial unique index exactly, so a repeat
+  // ask lands on `DO NOTHING` (zero rows) rather than an exception.
+  const written = await query(
+    `INSERT INTO subscription_requests (email, plan_requested, note)
+     VALUES ($1::text, $2::text, NULLIF($3::text, ''))
+     ON CONFLICT (lower(email)) WHERE status = 'PENDING' DO NOTHING
+     RETURNING id`,
+    [email, normalisePlan(input.plan), input.note.trim()],
+  );
+  if (written.length === 0) {
+    return { ok: true, note: "That email is already in the queue — the answer is coming." };
+  }
+  return { ok: true, note: `Request received for ${email} (${normalisePlan(input.plan)}). The Super Admin reviews the queue on the Accounts page.` };
+}
+
+/**
+ * Approve = create the account in the same action (this is why 0013 put no FK
+ * on the table), and mark the request. Dismiss = mark only. Either way the
+ * request row keeps who decided and when, and the audit row says the same.
+ */
+export async function handleSubscriptionRequest(
+  actor: SessionUser,
+  requestId: string,
+  decision: "APPROVE" | "DISMISS",
+  passwordForNewAccount: string,
+  ip: string | null,
+): Promise<AdminResult> {
+  const rows = await query<Raw>(
+    "SELECT id::text AS id, email, plan_requested, status FROM subscription_requests WHERE id = $1::bigint",
+    [requestId],
+  );
+  const request = rows[0];
+  if (!request) return { ok: false, status: 404, error: "No such request." };
+  if (String(request.status) !== "PENDING") {
+    return { ok: false, status: 409, error: `Already ${String(request.status).toLowerCase()} on ${String(request.handled_at ?? "earlier")}.` };
+  }
+  const email = String(request.email);
+  if (decision === "APPROVE") {
+    const created = await adminCreateUser(
+      actor,
+      { email, password: passwordForNewAccount, role: "USER", plan: normalisePlan(request.plan_requested) },
+      ip,
+    );
+    if (!created.ok) return created;
+  }
+  await query(
+    `UPDATE subscription_requests
+     SET status = $2::text, handled_at = now(), handled_by_email = $3::text
+     WHERE id = $1::bigint`,
+    [requestId, decision === "APPROVE" ? "APPROVED" : "DISMISSED", actor.email],
+  );
+  await query(
+    `INSERT INTO audit_logs (actor, actor_role, action, entity_type, entity_id, new_value, request_ip)
+     VALUES ($1::text, $2::text, $3::text, 'subscription_requests', $4::text, $5::jsonb, $6::text)`,
+    [actor.email, actor.role, `subscription_${decision.toLowerCase()}`, email, { decision }, ip],
+  ).catch(() => {});
+  return {
+    ok: true,
+    note:
+      decision === "APPROVE"
+        ? `Approved: ${email} has a ${normalisePlan(request.plan_requested)} account. Give them the password you set.`
+        : `Dismissed the request from ${email}. They can ask again; nothing was created.`,
+  };
 }

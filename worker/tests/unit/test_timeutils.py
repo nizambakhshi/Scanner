@@ -177,6 +177,52 @@ def test_next_and_previous_trading_day_skip_weekends() -> None:
     assert CALENDAR.next_trading_day(HOLIDAY) != HOLIDAY
 
 
+# ── days-page overrides (the /days document) ──────────────────────────────
+
+
+def test_overrides_beat_the_weekday_and_holiday_rules() -> None:
+    calendar = build_calendar((HOLIDAY,))
+    calendar.off_days.add(MONDAY)  # operator closes a plain weekday
+    calendar.on_days.add(SATURDAY)  # operator opens a special-session Saturday
+    assert calendar.is_trading_day(MONDAY) is False
+    assert calendar.is_trading_day(SATURDAY) is True
+    assert calendar.is_trading_day(TUESDAY) is True, "untouched days keep the plain rule"
+    calendar.on_days.add(HOLIDAY)
+    assert calendar.is_trading_day(HOLIDAY) is True, "on_days outranks everything"
+
+
+def test_parse_days_reads_both_lists_in_either_shape() -> None:
+    off, on = T.parse_days(
+        {
+            "version": 1,
+            "off_days": [{"date": "2026-10-26", "note": "Diwali"}, "2026-01-01"],
+            "on_days": [{"date": "2026-11-14", "note": ""}],
+        }
+    )
+    assert off == {date(2026, 10, 26), date(2026, 1, 1)}
+    assert on == {date(2026, 11, 14)}
+
+
+def test_parse_days_missing_or_blank_fields_are_empty_not_errors() -> None:
+    assert T.parse_days({}) == (set(), set())
+    off, on = T.parse_days({"off_days": [None, {"date": ""}], "on_days": []})
+    assert (off, on) == (set(), set())
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "not a document",
+        {"off_days": "closed"},
+        {"on_days": [{"date": "next tuesday"}]},
+    ],
+    ids=["not-an-object", "field-not-a-list", "unreadable-date"],
+)
+def test_parse_days_rejects_malformed_documents(document) -> None:
+    with pytest.raises(ValueError):
+        T.parse_days(document)
+
+
 # ── stamp parsing ─────────────────────────────────────────────────────────
 
 

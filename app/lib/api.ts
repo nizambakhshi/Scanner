@@ -9,7 +9,7 @@
  */
 
 import { NextResponse } from "next/server";
-import { requireUserApi } from "./auth/session";
+import { requireAdminApi, requireUserApi } from "./auth/session";
 import { panelError } from "./source";
 import type { SessionUser } from "./auth/users";
 
@@ -35,6 +35,14 @@ export function clientIp(request: Request): string | null {
 export async function guard(): Promise<Guard> {
   const user: SessionUser | null = await requireUserApi();
   if (!user) return { user: null, denied: fail("Sign in to use this endpoint.", 401) };
+  return { user, denied: null };
+}
+
+/** The same gate, admin-only: a plain user's cookie authenticates them, but a
+ *  control endpoint answers 403. */
+export async function adminGuard(): Promise<Guard> {
+  const user: SessionUser | null = await requireAdminApi();
+  if (!user) return { user: null, denied: fail("This endpoint is for the Super Admin.", 403) };
   return { user, denied: null };
 }
 

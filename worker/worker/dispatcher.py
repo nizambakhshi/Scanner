@@ -27,7 +27,7 @@ per-minute limits absorb comfortably.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -121,26 +121,64 @@ class Dispatcher:
             report.errors.append(f"delivery {delivery.id}: empty payload")
             return
 
-        result = await self.sender.send(text, chat_id=delivery.destination_reference)
-        if result.delivered:
+        # Fan out to every channel the sender is currently configured for —
+        # *not* to `delivery.destination_reference`: that row remembers the
+        # primary chat at queue time, and an alert queued an hour before the
+        # operator added a second channel should reach both. The reference
+        # stays in the row as the audit fact it is.
+        results = await self.sender.send_all(text)
+        if not results:
+            await self.store.update_delivery(
+                delivery.id,
+                status=DeliveryStatus.PERMANENTLY_FAILED,
+                attempt_count=attempt,
+                last_attempt_at=now,
+                last_error="telegram has no configured channel",
+            )
+            report.permanently_failed += 1
+            report.errors.append(f"delivery {delivery.id}: no telegram channel")
+            return
+
+        landed = [(chat, r) for chat, r in results if r.delivered]
+        missed = [(chat, r) for chat, r in results if not r.delivered]
+        if landed:
             await self.store.update_delivery(
                 delivery.id,
                 status=DeliveryStatus.DELIVERED,
                 attempt_count=attempt,
                 last_attempt_at=now,
                 delivered_at=now,
-                provider_message_id=str(result.message_id),
-                last_error=None,
+                provider_message_id=str(landed[0][1].message_id),
+                last_error=" · ".join(f"{chat}: {r.error}" for chat, r in missed)[:300] or None,
             )
             report.delivered += 1
             log.info(
                 "notification_delivered",
                 delivery_id=delivery.id,
                 signal_id=delivery.signal_id,
-                telegram_message_id=result.message_id,
+                telegram_message_id=landed[0][1].message_id,
                 attempts=attempt,
+                channels=len(results),
             )
+            for chat, result in missed:
+                # Partial is delivered, not retried: the row's status is one
+                # aggregate fact, and re-sending would duplicate the channels
+                # that already received it. The miss is loud here and in
+                # `last_error` on the row, where the dashboard shows it.
+                report.errors.append(f"delivery {delivery.id}: {chat} missed ({result.error})")
+                log.warning(
+                    "notification_channel_missed",
+                    delivery_id=delivery.id,
+                    chat_id=chat,
+                    error=scrub(result.error),
+                )
             return
+
+        # Nothing landed. Only a *unanimous* rejection is permanent — one bad
+        # chat id must not condemn an alert that a live channel would take on
+        # the next attempt. The first failure carries the retry classification.
+        result = next((r for _, r in results if r.permanent), results[0][1])
+        result = replace(result, permanent=all(r.permanent for _, r in results))
 
         exhausted = attempt >= self.settings.max_attempts
         status = (

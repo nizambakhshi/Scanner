@@ -5,35 +5,48 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { SignOutButton } from "./SignOutButton";
 import { ThemeToggle } from "./ThemeToggle";
+import { isAdminRole } from "@/lib/roles";
 import { sessionClock, type SessionPhase } from "@/lib/market-clock";
 
+/**
+ * The product's two halves, one list.
+ *
+ * `admin: true` marks the Super Admin's control surfaces — everything that
+ * changes how the scanner runs. A plain user's sections are Board, Watchlist,
+ * News, and their own Account (password lives there); the links the user never
+ * sees are also refused at the page and API layer, so this filter is navigation,
+ * not the gate.
+ */
 const LINKS = [
   { href: "/", label: "Board" },
   { href: "/watchlist", label: "Watchlist" },
   { href: "/news", label: "News" },
-  { href: "/strategy", label: "Strategy" },
-  { href: "/alerts", label: "Alert rules" },
-  { href: "/history", label: "Days" },
-  { href: "/health", label: "Health" },
-  { href: "/config", label: "Config" },
   { href: "/account", label: "Account" },
+  { href: "/accounts", label: "Accounts", admin: true },
+  { href: "/strategy", label: "Strategy", admin: true },
+  { href: "/alerts", label: "Alert rules", admin: true },
+  { href: "/days", label: "Days", admin: true },
+  { href: "/history", label: "History", admin: true },
+  { href: "/health", label: "Health", admin: true },
+  { href: "/config", label: "Config", admin: true },
 ] as const;
 
-export function Nav({ email }: { email: string }) {
+export function Nav({ email, role }: { email: string; role: string }) {
   const pathname = usePathname();
+  const links = isAdminRole(role) ? LINKS : LINKS.filter((link) => !("admin" in link && link.admin));
 
   return (
     <header className="sticky top-0 z-20 border-b border-line bg-surface/95 backdrop-blur">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2.5">
         <Link href="/" className="flex w-full shrink-0 items-baseline gap-2 sm:w-auto">
-          <span className="font-serif text-[19px] italic leading-none tracking-tight">Bullish Scanner</span>
+          <span className="font-serif text-[19px] italic leading-none tracking-tight">Intraday Scanner</span>
           <span className="font-display hidden text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-2 lg:inline">
             NSE · 1m
           </span>
         </Link>
 
         <nav className="flex flex-1 flex-wrap items-center gap-x-0.5 gap-y-1">
-          {LINKS.map((link) => {
+          {links.map((link) => {
             const active = link.href === "/" ? pathname === "/" : pathname.startsWith(link.href);
             return (
               <Link

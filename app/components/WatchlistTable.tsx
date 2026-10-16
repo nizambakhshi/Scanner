@@ -3,13 +3,13 @@ import { SectorChip } from "./SectorChip";
 import { SimChip } from "./SimulatedBanner";
 import { SortHeader } from "./SortHeader";
 import { Sparkline } from "./Sparkline";
-import { RsiBiasBadge, RsiStateBadge, StateBadge, rsiBandTone } from "./badges";
+import { RsiStateBadge, StateBadge, rsiBandTone } from "./badges";
 import { Empty } from "./ui";
 import { clock, dateTime, multiple, orDash, pct, price, rsi, score } from "@/lib/format";
 import type { SectorReads } from "@/lib/sector-reads";
 import { sectorFor } from "@/lib/sector-map";
 import type { SortWiring } from "@/lib/sorting";
-import type { RsiBias, WatchlistRow } from "@/lib/types";
+import type { WatchlistRow } from "@/lib/types";
 
 /**
  * The watchlist, which is the product.
@@ -67,9 +67,7 @@ export function WatchlistTable({
             ) : null}
             <SortHeader label="State" column="state" sort={sort} className="th" />
             <SortHeader label="Score" column="score" sort={sort} className="th text-right" />
-            <SortHeader label="Rank" column="rank" sort={sort} className="th hidden text-right md:table-cell" />
             <SortHeader label="Price" column="price" sort={sort} className="th text-right" />
-            <SortHeader label="Day chg" column="change" sort={sort} className="th text-right" />
             <SortHeader label="vs VWAP" column="vwap" sort={sort} className="th text-right" />
             <SortHeader label="EMA spread" column="ema" sort={sort} className="th hidden text-right xl:table-cell" />
             <SortHeader label="Rel vol" column="rvol" sort={sort} className="th hidden text-right md:table-cell" />
@@ -79,13 +77,6 @@ export function WatchlistTable({
               sort={sort}
               className="th text-right"
               title="Wilder RSI-14 on today's 5-minute closes, judged against the live trend — the reading the entry alert fires on"
-            />
-            <SortHeader
-              label="RSI D/W"
-              column="rsidw"
-              sort={sort}
-              className="th hidden text-right lg:table-cell"
-              title="Daily / weekly RSI-14 from the last completed daily bar — the nightly pair, not today's tape. The sort reads the daily side."
             />
             <SortHeader label="vs high" column="high" sort={sort} className="th hidden text-right xl:table-cell" />
             <SortHeader label="Candle" column="candle" sort={sort} className="th" />
@@ -139,22 +130,12 @@ export function WatchlistTable({
                   ) : null}
                 </td>
                 <td className="td num text-right font-semibold">{score(row.latest_score)}</td>
-                <td className="td hidden num text-right md:table-cell">
-                  {row.latest_rank === null ? (
-                    <span title="Ranks are assigned by the initial scan; a symbol that qualifies later is unranked">
-                      —
-                    </span>
-                  ) : (
-                    row.latest_rank
-                  )}
-                </td>
                 <td className="td num text-right">
                   {price(row.latest_price)}
                   <div className="num text-[11px] text-muted">
                     {row.initial_entry_price === null ? "" : `entry ${price(row.initial_entry_price)}`}
                   </div>
                 </td>
-                <td className={`td num text-right ${tone(row.intraday_change_pct)}`}>{pct(row.intraday_change_pct)}</td>
                 <td className={`td num text-right ${tone(row.distance_from_vwap_pct)}`}>
                   {pct(row.distance_from_vwap_pct)}
                   <div className="num text-[11px] text-muted">{row.vwap === null ? "" : `vwap ${price(row.vwap)}`}</div>
@@ -180,18 +161,6 @@ export function WatchlistTable({
                   )}
                   <div className="mt-0.5 flex justify-end">
                     <RsiStateBadge state={row.rsi_state} />
-                  </div>
-                </td>
-                <td className={`td hidden num text-right lg:table-cell ${biasTone(row.rsi_bias)}`}>
-                  {row.daily_rsi === null && row.weekly_rsi === null ? (
-                    <span className="text-muted" title="No daily/weekly RSI synced for this symbol yet">
-                      —
-                    </span>
-                  ) : (
-                    `${rsi(row.daily_rsi)} / ${rsi(row.weekly_rsi)}`
-                  )}
-                  <div className="mt-0.5 flex justify-end">
-                    <RsiBiasBadge bias={row.rsi_bias} />
                   </div>
                 </td>
                 <td className={`td hidden num text-right xl:table-cell ${tone(row.distance_from_high_pct)}`}>
@@ -234,15 +203,6 @@ function tone(value: number | null | undefined): string {
   if (value > 0) return "text-positive";
   if (value < 0) return "text-negative";
   return "text-ink-2";
-}
-
-/** The nightly classification carries the tone of its own column; an unclassified
- *  row stays at the inherited colour because "the sync has not covered it" is not a
- *  verdict in either direction. */
-function biasTone(bias: RsiBias): string {
-  if (bias === "ENTRY") return "text-positive";
-  if (bias === "OVERBOUGHT") return "text-negative";
-  return "";
 }
 
 /** Reason codes come from the scanner verbatim (`CLOSE_ABOVE_VWAP`); the table has

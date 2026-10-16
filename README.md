@@ -1,4 +1,4 @@
-# Intraday Bullish Scanner
+# Intraday Scanner
 
 A market-data scanner for NSE equities. It watches the Nifty 500 universe during live
 sessions, keeps a daily watchlist of symbols that are trending bullishly, and tells an

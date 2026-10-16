@@ -1,4 +1,4 @@
-import { body, clientIp, fail, guard, json, read } from "@/lib/api";
+import { body, clientIp, fail, adminGuard, json, read } from "@/lib/api";
 import { getRetentionState, saveRetentionWindow } from "@/lib/ops";
 
 export const dynamic = "force-dynamic";
@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
  * panel renders before it saves anything.
  */
 export async function GET() {
-  const { denied } = await guard();
+  const { denied } = await adminGuard();
   if (denied) return denied;
   return read(() => getRetentionState());
 }
@@ -24,7 +24,7 @@ export async function GET() {
  * so turning ageing off is as auditable as running a purge.
  */
 export async function PUT(request: Request) {
-  const { user, denied } = await guard();
+  const { user, denied } = await adminGuard();
   if (denied) return denied;
   const form = await body(request);
   try {

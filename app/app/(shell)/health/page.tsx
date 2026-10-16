@@ -4,6 +4,7 @@ import { RetentionPanel } from "@/components/RetentionPanel";
 import { ago, dateTime, duration, orDash } from "@/lib/format";
 import { ok, panel } from "@/lib/panel";
 import { renderNow } from "@/lib/render-time";
+import { requireAdminPage } from "@/lib/auth/session";
 import { authSetupProblem } from "@/lib/auth/users";
 import { describeSource } from "@/lib/source";
 import { source } from "@/lib/source";
@@ -20,6 +21,7 @@ export const dynamic = "force-dynamic";
  * variable *names* that are missing — a value can never reach this render path.
  */
 export default async function HealthPage() {
+  await requireAdminPage();
   const [status, workers, coverage, config] = await Promise.all([
     panel(describeSource),
     panel(() => source().workerStatus()),

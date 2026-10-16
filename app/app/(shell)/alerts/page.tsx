@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Panel, ErrorNote, Empty, PageHeading } from "@/components/ui";
 import { StrategyBoard } from "@/components/StrategyBoard";
 import { TelegramPanel } from "@/components/TelegramPanel";
+import { requireAdminPage } from "@/lib/auth/session";
 import { ok, panel } from "@/lib/panel";
 import { readActivityToday, readStrategiesState, readTelegramState } from "@/lib/alerts-store";
 import { STRATEGIES, strategiesAdvisories } from "@/lib/alert-strategies";
@@ -26,6 +27,7 @@ export const dynamic = "force-dynamic";
  * and vice versa.
  */
 export default async function AlertsPage() {
+  await requireAdminPage();
   const [strategies, telegram, activity] = await Promise.all([
     panel(() => readStrategiesState()),
     panel(() => readTelegramState()),

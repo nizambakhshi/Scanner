@@ -20,8 +20,10 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { cache } from "react";
 import { env, usesPostgres } from "../env";
 import { query, type Raw } from "../db";
+import { isAdminRole } from "../roles";
 import type { SessionUser } from "./users";
 
 export const SESSION_COOKIE = "scanner_session";
@@ -151,7 +153,15 @@ export async function destroySession(userId?: string) {
   store.delete(SESSION_COOKIE);
 }
 
-export async function getCurrentUser(): Promise<SessionUser | null> {
+/**
+ * One session read per render pass.
+ *
+ * React's `cache` gives every caller in the same request the same result: the
+ * shell layout and the page under it used to each pay for the `app_sessions`
+ * JOIN, and on the 15-client session pooler the duplicate was real pressure.
+ * `last_seen_at` telemetry also lands exactly once per page view now.
+ */
+export const getCurrentUser = cache(async (): Promise<SessionUser | null> => {
   const payload = readToken((await cookies()).get(SESSION_COOKIE)?.value);
   if (!payload) return null;
   if (!usesPostgres()) {
@@ -193,7 +203,7 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
     displayName: row.display_name === null ? null : String(row.display_name),
     source: "postgres",
   };
-}
+});
 
 /** For pages: send the visitor to the login form instead of rendering a shell. */
 export async function requireUserPage(): Promise<SessionUser> {
@@ -205,4 +215,18 @@ export async function requireUserPage(): Promise<SessionUser> {
 /** For route handlers: `null` means respond 401, not redirect. */
 export async function requireUserApi(): Promise<SessionUser | null> {
   return getCurrentUser();
+}
+
+/** For admin pages: a signed-in plain user who arrives at this URL directly is
+ *  sent back to their board — the nav hides the link, but hiding is not a gate. */
+export async function requireAdminPage(): Promise<SessionUser> {
+  const user = await requireUserPage();
+  if (!isAdminRole(user.role)) redirect("/");
+  return user;
+}
+
+/** For admin route handlers: `null` means respond 403. */
+export async function requireAdminApi(): Promise<SessionUser | null> {
+  const user = await requireUserApi();
+  return user && isAdminRole(user.role) ? user : null;
 }

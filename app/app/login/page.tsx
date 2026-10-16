@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/auth/session";
 import { authSetupProblem } from "@/lib/auth/users";
@@ -38,7 +39,7 @@ export default async function LoginPage() {
         <div className="w-full max-w-[380px]">
           <div className="mb-5">
             <p className="eyebrow">NSE · 1m · intraday</p>
-            <h1 className="font-serif mt-1 text-[30px] italic leading-tight tracking-tight">Bullish Scanner</h1>
+            <h1 className="font-serif mt-1 text-[30px] italic leading-tight tracking-tight">Intraday Scanner</h1>
             <p className="mt-1.5 text-[13px] leading-snug text-muted">
               The operator view of the daily watchlist, the alert feed and the delivery queue. Read-only: this
               dashboard cannot place, modify or cancel an order.
@@ -53,6 +54,15 @@ export default async function LoginPage() {
             Eight failed attempts from one address in fifteen minutes locks it out. A session lasts {env.sessionHours}{" "}
             hours from sign-in — it does not extend with use, and signing out revokes it in the database as well as
             clearing this browser.
+          </p>
+          {/* The public half of the product: an operator account is created by hand, so
+              the way in for anyone not yet on the dashboard is the subscribe queue. */}
+          <p className="mt-2 text-[12px] leading-snug text-muted">
+            No account yet?{" "}
+            <Link href="/subscribe" className="link">
+              See the plans and request access
+            </Link>
+            .
           </p>
           {/* Deliberate, and worth stating where someone who is locked out will read it:
               there is no emailed link, because this app sends no mail and an endpoint that

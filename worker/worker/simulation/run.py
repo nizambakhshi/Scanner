@@ -104,8 +104,8 @@ class RecordingTelegramSender:
     """The :class:`~worker.telegram.TelegramSender` interface, satisfied locally.
 
     Duck-typed on purpose: :class:`~worker.dispatcher.Dispatcher` only calls
-    ``send`` and ``close``, so the loop under test is the production one with its
-    network edge swapped out. ``fail_first`` makes that many attempts fail with a
+    ``send_all`` and ``close``, so the loop under test is the production one with
+    its network edge swapped out. ``fail_first`` makes that many attempts fail with a
     retryable HTTP 500, which exercises the durable retry ladder (§13) instead of
     only the happy path.
     """
@@ -119,6 +119,10 @@ class RecordingTelegramSender:
     @property
     def configured(self) -> bool:
         return True
+
+    @property
+    def chat_targets(self) -> list[str]:
+        return [SIMULATED_CHAT_ID]
 
     async def send(self, text: str, *, chat_id: str | None = None) -> TelegramResult:
         if self._failures_left > 0:
@@ -135,6 +139,9 @@ class RecordingTelegramSender:
         return TelegramResult(
             ok=True, message_id=500000 + self._message_id, attempts=1, http_status=200
         )
+
+    async def send_all(self, text: str) -> list[tuple[str, TelegramResult]]:
+        return [(chat, await self.send(text, chat_id=chat)) for chat in self.chat_targets]
 
     async def close(self) -> None:
         return None

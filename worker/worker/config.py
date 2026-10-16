@@ -318,6 +318,10 @@ def base_url_is_https(value: str) -> bool:
 class TelegramSettings:
     bot_token: str = field(default="", repr=False)
     chat_id: str = ""
+    #: Additional channels the /alerts page can hold. ``chat_id`` stays the
+    #: primary — the old single-channel contract — so a settings document with
+    #: only the pair behaves exactly as it did before this field existed.
+    extra_chat_ids: tuple[str, ...] = ()
     api_url: str = "https://api.telegram.org"
     max_attempts: int = 5
     retry_base_seconds: int = 10

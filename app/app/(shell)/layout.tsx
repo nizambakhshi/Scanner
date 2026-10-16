@@ -17,7 +17,7 @@ export default async function ShellLayout({ children }: { children: React.ReactN
   const meta = await source().meta();
   return (
     <div className="min-h-screen">
-      <Nav email={user.displayName ? `${user.displayName} · ${user.email}` : user.email} />
+      <Nav email={user.displayName ? `${user.displayName} · ${user.email}` : user.email} role={user.role} />
       <SimulatedBanner meta={meta} />
       <main className="mx-auto max-w-[1400px] px-4 pb-16 pt-5">{children}</main>
       <footer className="border-t border-line bg-surface">

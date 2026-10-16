@@ -1,4 +1,4 @@
-import { body, clientIp, fail, guard, json } from "@/lib/api";
+import { body, clientIp, fail, adminGuard, json } from "@/lib/api";
 import { RETENTION_MAX, RETENTION_MIN, runPurge } from "@/lib/ops";
 
 export const dynamic = "force-dynamic";
@@ -16,7 +16,7 @@ export const dynamic = "force-dynamic";
  * statement reported, and the audit row records them.
  */
 export async function POST(request: Request) {
-  const { user, denied } = await guard();
+  const { user, denied } = await adminGuard();
   if (denied) return denied;
   const form = await body(request);
   const days = Number(form.days);

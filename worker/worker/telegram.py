@@ -137,6 +137,18 @@ class TelegramSender:
     def configured(self) -> bool:
         return bool(self.settings.bot_token and self.settings.chat_id)
 
+    @property
+    def chat_targets(self) -> list[str]:
+        """Every live channel, primary first, de-duplicated.
+
+        Read through ``self.settings`` rather than captured at construction:
+        ``_apply_alert_settings`` swaps the settings object when the dashboard
+        saves, and the dispatcher must fan out to the channels of *now*, not of
+        session open.
+        """
+        ids = [self.settings.chat_id, *self.settings.extra_chat_ids]
+        return [chat for chat in dict.fromkeys(str(i).strip() for i in ids) if chat]
+
     def method_url(self) -> str:
         """Build the endpoint. Contains the bot token — never log the result."""
         return f"{self.settings.api_url.rstrip('/')}/bot{self.settings.bot_token}/sendMessage"
@@ -189,6 +201,17 @@ class TelegramSender:
             error=scrub(final.error),
         )
         return final
+
+    async def send_all(self, text: str) -> list[tuple[str, TelegramResult]]:
+        """Send one message to every channel, in order.
+
+        Sequential on purpose: Telegram's limiter is per-chat but the bot token
+        is shared, and firing at all channels at once is how a multi-channel
+        setup teaches a single-chat burst a 429 lesson. A dead channel costs one
+        send sequence and nothing more — its result is reported per chat, and
+        the caller decides what the aggregate means.
+        """
+        return [(chat, await self.send(text, chat_id=chat)) for chat in self.chat_targets]
 
     def _backoff(self, attempts: int) -> float:
         """Exponential backoff on the configured base, capped so retries settle."""

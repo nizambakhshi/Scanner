@@ -1,4 +1,4 @@
-import { body, clientIp, fail, guard, json } from "@/lib/api";
+import { body, clientIp, fail, adminGuard, json } from "@/lib/api";
 import { parseConfigEdits, saveScannerConfig } from "@/lib/scanner-config";
 
 export const dynamic = "force-dynamic";
@@ -16,7 +16,7 @@ export const dynamic = "force-dynamic";
  * values it started with; the config page says so next to the form.
  */
 export async function POST(request: Request) {
-  const { user, denied } = await guard();
+  const { user, denied } = await adminGuard();
   if (denied) return denied;
   const form = await body(request);
   const parsed = parseConfigEdits(form);

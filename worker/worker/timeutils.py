@@ -15,7 +15,7 @@ session manager surfaces the warning instead of silently guessing.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -164,8 +164,23 @@ class TradingCalendar:
     retrieved_at: str | None
     loaded_from_file: bool
     stale: bool
+    #: Date overrides from the dashboard's Days page (`ops_settings['days']`),
+    #: mutated in place by the 60-second adoption loop — the pipeline shares
+    #: this object, so an override reaches every consumer at once. A mutable
+    #: field on a frozen dataclass: the *reference* never changes, its contents
+    #: are the live calendar exceptions.
+    off_days: set[date] = field(default_factory=set)
+    on_days: set[date] = field(default_factory=set)
 
     def is_trading_day(self, day: date) -> bool:
+        # The Days page's rule, same precedence as the app's own gate: a
+        # forced-open date beats everything (holiday or weekend), a marked-off
+        # date is closed even on a plain weekday, and with neither the
+        # weekday-plus-holidays rule below is exactly what ran before this.
+        if day in self.on_days:
+            return True
+        if day in self.off_days:
+            return False
         return day.weekday() < 5 and day not in self.holidays
 
     def session(self, day: date) -> SessionWindow | None:
@@ -320,3 +335,36 @@ def load_calendar(path: Path | None = None, *, today: date | None = None) -> Tra
         loaded_from_file=loaded,
         stale=stale,
     )
+
+
+def parse_days(document: object) -> tuple[set[date], set[date]]:
+    """Parse the dashboard's ``ops_settings['days']`` document.
+
+    The app's /days page owns the shape — ``{off_days: [{date, note}], on_days:
+    [{date, note}]}`` — and refuses malformed dates at save time, so anything
+    unparseable here means a hand-edited row. That is *reported* (ValueError,
+    which the adoption loop logs) rather than obeyed halfway: the same rule as
+    the strategies document, because a calendar the operator cannot see working
+    is worse than one that keeps the last good exceptions.
+    """
+    if not isinstance(document, dict):
+        raise ValueError(f"days document must be an object, got {type(document).__name__}")
+    return (_read_day_list(document, "off_days"), _read_day_list(document, "on_days"))
+
+
+def _read_day_list(document: dict, field: str) -> set[date]:
+    raw = document.get(field)
+    if raw is None:
+        return set()
+    if not isinstance(raw, list):
+        raise ValueError(f"days.{field} must be a list")
+    days: set[date] = set()
+    for entry in raw:
+        value = entry.get("date") if isinstance(entry, dict) else entry
+        if not value:
+            continue
+        try:
+            days.add(date.fromisoformat(str(value)[:10]))
+        except ValueError as exc:
+            raise ValueError(f"days.{field} carries an unreadable date {value!r}") from exc
+    return days

@@ -1,4 +1,5 @@
 import { Panel, ErrorNote, PageHeading, FilterChip, Empty } from "@/components/ui";
+import { requireAdminPage } from "@/lib/auth/session";
 import { OrbTable } from "@/components/OrbTable";
 import { filterOrbViews, parseOrbStatusFilter, type OrbStatusFilter } from "@/lib/filters";
 import { longDate } from "@/lib/format";
@@ -32,6 +33,7 @@ export default async function StrategyPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
+  await requireAdminPage();
   const params = await searchParams;
   const status = parseOrbStatusFilter(params.status);
 

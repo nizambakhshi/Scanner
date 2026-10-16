@@ -333,3 +333,41 @@ async def test_bot_token_never_leaks_into_the_result(responses):
     # sender must never echo that recorded URL back in anything it returns.
     assert SECRET in client.calls[-1]["url"]
     assert "api.telegram.org" not in repr(result)
+
+
+# ── multi-channel fan-out: chat_targets and send_all ─────────────────────
+
+def test_chat_targets_orders_dedupes_and_drops_blanks():
+    sender, _, _ = sender_with(
+        [], chat_id=" chat-1 ", extra_chat_ids=("chat-2", "", "chat-1", "  ")
+    )
+    assert sender.chat_targets == ["chat-1", "chat-2"]
+
+
+def test_chat_targets_is_empty_when_nothing_is_configured():
+    sender, _, _ = sender_with([], bot_token="", chat_id="", extra_chat_ids=())
+    assert sender.chat_targets == []
+
+
+async def test_send_all_visits_every_channel_and_reports_each_one():
+    """Per-channel results, not a single verdict: one dead chat must not hide
+    a delivered message in another, and the dispatcher needs both halves."""
+    sender, client, _ = sender_with(
+        [
+            FakeResponse(200, ok_payload(message_id=42)),
+            FakeResponse(400, {"ok": False, "description": "Bad Request: chat not found"}),
+        ],
+        chat_id="chat-1",
+        extra_chat_ids=("chat-2",),
+    )
+    results = await sender.send_all("hello")
+    assert [chat for chat, _ in results] == ["chat-1", "chat-2"]
+    assert results[0][1].delivered is True and results[0][1].message_id == 42
+    assert results[1][1].delivered is False and results[1][1].permanent is True
+    assert [call["json"]["chat_id"] for call in client.calls] == ["chat-1", "chat-2"]
+
+
+async def test_send_all_with_no_channel_makes_no_client_call():
+    sender, client, _ = sender_with([], chat_id="", extra_chat_ids=())
+    assert await sender.send_all("hello") == []
+    assert client.calls == []

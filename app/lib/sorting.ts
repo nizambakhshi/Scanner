@@ -38,14 +38,11 @@ export const MEMBER_SORT_KEYS = [
   "sector",
   "state",
   "score",
-  "rank",
   "price",
-  "change",
   "vwap",
   "ema",
   "rvol",
   "rsi",
-  "rsidw",
   "high",
   "candle",
 ] as const;
@@ -70,22 +67,18 @@ export const STOCK_SORT_KEYS = [
 export type StockSortKey = (typeof STOCK_SORT_KEYS)[number];
 
 /** Which direction a column means when first clicked. Numbers descend (the
- *  biggest first) unless small is the interesting end — rank 1 is best, and an
- *  RSI sort is the dip hunt, so it ascends. Text ascends; dates descend
- *  (newest first). */
+ *  biggest first) unless small is the interesting end — an RSI sort is the dip
+ *  hunt, so it ascends. Text ascends; dates descend (newest first). */
 const MEMBER_DEFAULT_DIR: Record<MemberSortKey, SortDir> = {
   symbol: "asc",
   sector: "asc",
   state: "asc",
   score: "desc",
-  rank: "asc",
   price: "desc",
-  change: "desc",
   vwap: "desc",
   ema: "desc",
   rvol: "desc",
   rsi: "asc",
-  rsidw: "asc",
   high: "desc",
   candle: "desc",
 };
@@ -214,12 +207,8 @@ export function compareMembers(dir: SortDir, key: MemberSortKey): (a: WatchlistR
       return byNumber(dir, (row) => STATE_ORDER[row.current_state]);
     case "score":
       return byNumber(dir, (row) => row.latest_score);
-    case "rank":
-      return byNumber(dir, (row) => row.latest_rank);
     case "price":
       return byNumber(dir, (row) => row.latest_price);
-    case "change":
-      return byNumber(dir, (row) => row.intraday_change_pct);
     case "vwap":
       return byNumber(dir, (row) => row.distance_from_vwap_pct);
     case "ema":
@@ -228,10 +217,6 @@ export function compareMembers(dir: SortDir, key: MemberSortKey): (a: WatchlistR
       return byNumber(dir, (row) => row.relative_volume);
     case "rsi":
       return byNumber(dir, (row) => row.rsi_5m);
-    case "rsidw":
-      // The column pairs daily and weekly; the daily reading is the primary of
-      // the pair, and the weekly is context beside it.
-      return byNumber(dir, (row) => row.daily_rsi);
     case "high":
       return byNumber(dir, (row) => row.distance_from_high_pct);
     case "candle":
