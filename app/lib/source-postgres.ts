@@ -107,26 +107,52 @@ const WATCHLIST_SQL = `
            w.latest_score DESC NULLS LAST,
            w.symbol`;
 
+/** The signal feed reads its own LIMIT first and only then joins instruments
+ *  and folds deliveries — 573 ms per Board render went to the old view form,
+ *  which grouped every one of the day's signals (2,851) before the outer LIMIT
+ *  12 threw 2,839 of them away. Measured against the same Friday data: 26 ms.
+ *  The telegram columns keep the view's exact expressions, so a dashboard
+ *  delivery sitting beside a failed Telegram one still reads identically. */
 const SIGNALS_SQL = `
-  SELECT id::int AS id, signal_type, event_timestamp, candle_start_at,
-         price::float8 AS price, previous_close::float8 AS previous_close,
-         intraday_change_pct::float8 AS intraday_change_pct, vwap::float8 AS vwap,
-         ema9::float8 AS ema9, ema20::float8 AS ema20,
-         relative_volume::float8 AS relative_volume, score::float8 AS score,
-         rank::int AS rank, reasons, message, config_version::int AS config_version,
-         is_simulated, trading_session_id::int AS trading_session_id,
-         trading_date::text AS trading_date, instrument_id::int AS instrument_id,
-         symbol, trading_symbol, company_name, exchange,
-         COALESCE(telegram_delivered, false) AS telegram_delivered,
-         COALESCE(telegram_failed, false)    AS telegram_failed,
-         telegram_status, COALESCE(telegram_attempts, 0)::int AS telegram_attempts,
-         telegram_error
-  FROM v_signal_feed
-  WHERE ($1::date IS NULL OR trading_date = $1::date)
-    AND ($2::text IS NULL OR signal_type = $2::text)
-    AND ($3::text IS NULL OR upper(symbol) = upper($3::text))
-  ORDER BY event_timestamp DESC
-  LIMIT $4::int`;
+  WITH page AS (
+    SELECT sig.id
+    FROM signals sig
+    LEFT JOIN trading_sessions s ON s.id = sig.trading_session_id
+    LEFT JOIN instruments i ON i.id = sig.instrument_id
+    WHERE ($1::date IS NULL OR s.trading_date = $1::date)
+      AND ($2::text IS NULL OR sig.signal_type = $2::text)
+      AND ($3::text IS NULL OR upper(i.symbol) = upper($3::text))
+    ORDER BY sig.event_timestamp DESC
+    LIMIT $4::int
+  )
+  SELECT p.id::int AS id, p.signal_type, p.event_timestamp, p.candle_start_at,
+         p.price::float8 AS price, p.previous_close::float8 AS previous_close,
+         p.intraday_change_pct::float8 AS intraday_change_pct, p.vwap::float8 AS vwap,
+         p.ema9::float8 AS ema9, p.ema20::float8 AS ema20,
+         p.relative_volume::float8 AS relative_volume, p.score::float8 AS score,
+         p.rank::int AS rank, p.reasons, p.message, p.config_version::int AS config_version,
+         p.is_simulated, p.trading_session_id::int AS trading_session_id,
+         s.trading_date::text AS trading_date, p.instrument_id::int AS instrument_id,
+         i.symbol, i.trading_symbol, i.company_name, i.exchange,
+         COALESCE(d.telegram_delivered, false) AS telegram_delivered,
+         COALESCE(d.telegram_failed, false)    AS telegram_failed,
+         d.telegram_status, COALESCE(d.telegram_attempts, 0)::int AS telegram_attempts,
+         d.telegram_error
+  FROM page g
+  JOIN signals p ON p.id = g.id
+  LEFT JOIN trading_sessions s ON s.id = p.trading_session_id
+  LEFT JOIN instruments i ON i.id = p.instrument_id
+  LEFT JOIN LATERAL (
+    SELECT bool_or(nd.channel = 'TELEGRAM' AND nd.delivery_status = 'DELIVERED') AS telegram_delivered,
+           bool_and(nd.channel = 'TELEGRAM' AND
+                    nd.delivery_status IN ('FAILED', 'PERMANENTLY_FAILED'))      AS telegram_failed,
+           max(CASE WHEN nd.channel = 'TELEGRAM' THEN nd.delivery_status END)    AS telegram_status,
+           max(CASE WHEN nd.channel = 'TELEGRAM' THEN nd.attempt_count END)      AS telegram_attempts,
+           max(CASE WHEN nd.channel = 'TELEGRAM' THEN nd.last_error END)         AS telegram_error
+    FROM notification_deliveries nd
+    WHERE nd.signal_id = p.id
+  ) d ON true
+  ORDER BY p.event_timestamp DESC`;
 
 const HISTORY_SQL = `
   SELECT trading_session_id::int AS trading_session_id, trading_date::text AS trading_date,
@@ -384,23 +410,30 @@ const CANDLES_SQL = `
  *  closes, one per 5-minute bucket (the last 1-minute close in each). 09:15 IST
  *  is an exact 300-second epoch boundary, so bucketing by the epoch floor is the
  *  same partition the ORB page uses. A bucket that traded nothing produces no
- *  point — the glyph is as dense as the data, never padded. */
+ *  point — the glyph is as dense as the data, never padded.
+ *
+ *  One sort of the day's candles by (instrument, bucket, time desc) and a
+ *  DISTINCT ON pick beats the old double-`array_agg` form, which re-sorted
+ *  inside all ~15,900 buckets: 418 ms became 78 ms on the same Friday tape. */
 const INTRADAY_SPARK_SQL = `
   WITH w AS (
     SELECT max(trading_date) AS trading_date FROM candles_1m
   ),
-  bucket AS (
-    SELECT c.instrument_id,
+  last AS (
+    SELECT DISTINCT ON (c.instrument_id,
+                        floor(extract(epoch FROM c.candle_start_at) / 300.0)::bigint)
+           c.instrument_id,
            floor(extract(epoch FROM c.candle_start_at) / 300.0)::bigint AS bucket,
-           max(c.candle_start_at) AS last_at,
-           (array_agg(c.close ORDER BY c.candle_start_at DESC))[1] AS close
+           c.close
     FROM candles_1m c CROSS JOIN w
     WHERE c.trading_date = w.trading_date
-    GROUP BY c.instrument_id, floor(extract(epoch FROM c.candle_start_at) / 300.0)::bigint
+    ORDER BY c.instrument_id,
+             floor(extract(epoch FROM c.candle_start_at) / 300.0)::bigint,
+             c.candle_start_at DESC
   )
   SELECT instrument_id::int AS instrument_id,
          array_agg(close::float8 ORDER BY bucket) AS closes
-  FROM bucket
+  FROM last
   GROUP BY instrument_id`;
 
 /** Sparkline series for the /stocks directory: the newest daily closes, oldest
@@ -583,16 +616,30 @@ export const postgresSource: ScannerSource = {
     const rows = await query<Raw>(INSTRUMENT_SQL, [symbol]);
     const instrument = rows[0] ? mapInstrument(rows[0]) : null;
     if (!instrument) return null;
-    const candles = (await query<Raw>(CANDLES_SQL, [instrument.id, 400])).map(mapCandle).reverse();
-    const snapshots = (await query<Raw>(SNAPSHOTS_SQL, [instrument.id, 400])).map(mapSnapshot).reverse();
-    const events = (await query<Raw>(EVENTS_SQL, [null, instrument.id, 200])).map(mapEvent);
-    const membership = (await query<Raw>(WATCHLIST_SQL, [null, instrument.symbol]).then((r) => r.map(mapWatchlist)))[0] ?? null;
-    const overviewRows = await query<Raw>(STOCK_OVERVIEW_SQL, [instrument.symbol]);
-    const overview = overviewRows[0] ? mapStockOverview(overviewRows[0]) : null;
+    // Seven reads, one wave: each of these only needs the instrument the first
+    // query named, and on two pooler sockets seven serial round-trips made this
+    // the slowest page on the app.
+    const [candles, snapshots, events, memberships, overviewRows, dailyRsiRows, weeklyRsiRows] =
+      await Promise.all([
+        query<Raw>(CANDLES_SQL, [instrument.id, 400]),
+        query<Raw>(SNAPSHOTS_SQL, [instrument.id, 400]),
+        query<Raw>(EVENTS_SQL, [null, instrument.id, 200]),
+        query<Raw>(WATCHLIST_SQL, [null, instrument.symbol]),
+        query<Raw>(STOCK_OVERVIEW_SQL, [instrument.symbol]),
+        query<Raw>(DAILY_RSI_SQL, [instrument.id, 7]),
+        query<Raw>(WEEKLY_RSI_SQL, [instrument.id, 7]),
+      ]);
     // Newest-first in SQL, oldest-first for rendering — a chart axis runs left to right.
-    const daily_rsi = (await query<Raw>(DAILY_RSI_SQL, [instrument.id, 7])).map(mapDailyRsiPoint).reverse();
-    const weekly_rsi = (await query<Raw>(WEEKLY_RSI_SQL, [instrument.id, 7])).map(mapWeeklyRsiPoint).reverse();
-    return { instrument, candles, snapshots, events, membership, overview, daily_rsi, weekly_rsi };
+    return {
+      instrument,
+      candles: candles.map(mapCandle).reverse(),
+      snapshots: snapshots.map(mapSnapshot).reverse(),
+      events: events.map(mapEvent),
+      membership: memberships.map(mapWatchlist)[0] ?? null,
+      overview: overviewRows[0] ? mapStockOverview(overviewRows[0]) : null,
+      daily_rsi: dailyRsiRows.map(mapDailyRsiPoint).reverse(),
+      weekly_rsi: weeklyRsiRows.map(mapWeeklyRsiPoint).reverse(),
+    };
   },
 
   async stocksOverview() {
