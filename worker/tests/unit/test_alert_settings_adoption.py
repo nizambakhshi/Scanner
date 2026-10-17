@@ -61,6 +61,10 @@ def document(**changes: object) -> dict:
 async def build_session(rt: WorkerRuntime, store: InMemoryStore) -> None:
     """Give the runtime a live pipeline, the way ``_run_session`` would."""
     window = rt.calendar.session(now_ist().date())
+    if window is None:
+        # A weekend or holiday must not fail the helper: these tests exercise
+        # settings adoption, not the clock, so any open session works.
+        window = rt.calendar.session(rt.calendar.next_trading_day(now_ist().date()))
     assert window is not None, "the calendar must know today for this to be a session"
     session = await store.ensure_session(window.trading_date, window.open_at, window.close_at)
     instrument = Instrument(

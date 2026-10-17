@@ -62,9 +62,10 @@ export function SectorTile({ initial }: { initial: SectorQuoteRow[] | null }) {
     };
   }, []);
 
-  // Staleness is evaluated at render time; every poll re-renders, so chips
-  // cross the threshold within one poll of going quiet.
-  const now = fetchedAt ?? Date.now();
+  // Staleness is evaluated against the last poll's clock; every poll re-renders,
+  // so chips cross the threshold within one poll of going quiet. Before the
+  // first fetch completes nothing is dashed yet — that window is under a second.
+  const now = fetchedAt ?? 0;
 
   return (
     <div className="px-4 py-3">

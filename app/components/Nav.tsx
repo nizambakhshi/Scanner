@@ -103,7 +103,6 @@ const PHASE_FACE: Record<SessionPhase, { label: string; dot: string; tone: strin
 function SessionStrip() {
   const [now, setNow] = useState<Date | null>(null);
   useEffect(() => {
-    setNow(new Date());
     const id = window.setInterval(() => setNow(new Date()), 1_000);
     return () => window.clearInterval(id);
   }, []);

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Panel, Empty, ErrorNote, PageHeading } from "@/components/ui";
+import { Panel, ErrorNote, PageHeading } from "@/components/ui";
 import { DaysEditor } from "@/components/DaysEditor";
 import { requireAdminPage } from "@/lib/auth/session";
 import { ok, panel } from "@/lib/panel";
