@@ -3,6 +3,7 @@ import { Empty, ErrorNote, FilterChip, PageHeading, Panel } from "@/components/u
 import { ago, dateTime, humanise } from "@/lib/format";
 import { newsDesk, tagSymbols, type NewsArticle, type NewsPriority, type NewsSentiment } from "@/lib/news";
 import { ok, panel } from "@/lib/panel";
+import { renderNow } from "@/lib/render-time";
 import { source } from "@/lib/source";
 
 export const dynamic = "force-dynamic";
@@ -53,6 +54,9 @@ export default async function NewsPage({
   const reports = ok(desk) ? desk.data.reports : [];
   const answered = reports.filter((report) => report.error === null);
   const failed = reports.filter((report) => report.error !== null);
+  // One render instant for every "ago" on the page — the desk-wide timestamp and
+  // each headline are measured against the same clock (lib/render-time).
+  const now = renderNow();
 
   return (
     <div className="space-y-4">
@@ -84,7 +88,7 @@ export default async function NewsPage({
           ok(desk) ? (
             <>
               {articles.length} headlines · {answered.length} of {reports.length} sources answered · updated{" "}
-              {ago(desk.data.fetchedAt)}
+              {ago(desk.data.fetchedAt, now)}
               {cut.length > visible.length ? ` · showing first ${visible.length}` : ""}
             </>
           ) : undefined
@@ -103,7 +107,7 @@ export default async function NewsPage({
             {visible.map((article) => (
               <li key={article.id} className="border-b border-line px-4 py-3 last:border-b-0">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted">
-                  <span title={dateTime(article.at)}>{ago(article.at)}</span>
+                  <span title={dateTime(article.at)}>{ago(article.at, now)}</span>
                   <span aria-hidden>·</span>
                   <span>{article.source}</span>
                   <PriorityChip priority={article.priority} />

@@ -4,6 +4,7 @@ import { PasswordForm } from "@/components/PasswordForm";
 import { Panel, PageHeading, ErrorNote } from "@/components/ui";
 import { ago, dateTime, orDash } from "@/lib/format";
 import { ok, panel } from "@/lib/panel";
+import { renderNow } from "@/lib/render-time";
 
 export const dynamic = "force-dynamic";
 
@@ -42,7 +43,11 @@ export default async function AccountPage() {
               <Row label="User table" value={read.canChangePassword ? "app_users (Postgres)" : "environment (replay)"} />
               <Row
                 label="Last sign-in"
-                value={read.lastLoginAt === null ? "not recorded" : `${dateTime(read.lastLoginAt)} · ${ago(read.lastLoginAt)}`}
+                value={
+                  read.lastLoginAt === null
+                    ? "not recorded"
+                    : `${dateTime(read.lastLoginAt)} · ${ago(read.lastLoginAt, renderNow())}`
+                }
               />
               <Row
                 label="Live sessions"
